@@ -28,9 +28,14 @@ momo-studio 设置 → 插件 → 开发目录安装，指向本仓的插件目�
 ## 本机产物（不入库）
 
 `plugins/codegraph/engine/`（解包引擎，~283MB）与 `plugins/codegraph/vendor/`
-（平台 tarball，~56MB）已 gitignore。新机器获取方式：从原环境拷贝，或依赖插件
-运行时自身的引擎下载机制（engineVersion 1.6.2）。引擎缺失时 tests/ 全部 skip，
-不影响跑绿。
+（平台 tarball，~56MB）已 gitignore。新机器获取方式（二选一）：
+
+- 从原环境拷贝 `engine/` 与 `vendor/` 两个目录；
+- 经 momo-studio 的 momo-hub 发布链安装插件包（vendor tarball 内含引擎，安装
+  时校验 sha256 + probe 可执行性）。
+
+注意：插件运行时**不做引擎下载**（`mcp/mcp.json` 显式设 `CODEGRAPH_NO_DOWNLOAD=1`）。
+引擎缺失时依赖引擎的测试（harness / 探针 / boot-chain）skip，其余测试照常真跑。
 
 ## 测试
 
@@ -45,6 +50,8 @@ npx pnpm@9.0.0 test              # 引擎在位则真跑；缺失则 skip
 - 需要 sibling 目录有 momo-studio checkout 且已 `pnpm install`（测试经动态
   import 引用宿主内部模块 `db` / `host-manager` / `installer` 等，其 bare 依赖
   经宿主自身 node_modules 解析）
-- 宿主位置默认 `../momo-studio`，可用环境变量 `MOMO_STUDIO_ROOT` 覆盖
+- 宿主位置默认按 sibling 候选探测（`../momo-studio`、`../moo-studio`——取首个
+  在位者），可用环境变量 `MOMO_STUDIO_ROOT` 显式指定（显式设置即独占，设错
+  → 测试 skip 而非静默回退）
 - **耦合警告**：宿主重构改动上述内部模块 API 时，本仓测试需同步修改——这是
   有意保留的耦合面（spec D2），README 即契约
