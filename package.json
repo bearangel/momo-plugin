@@ -1,0 +1,13 @@
+{
+  "name": "momo-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Momo Studio 插件集中研发仓库（宿主：momo-studio）",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "vitest": "^1.6.1"
+  }
+}
