@@ -11,7 +11,12 @@ plugins/<插件id>/     # 每个插件一个目录（momo-plugin.json 所在根�
 tests/               # 跨仓测试（依赖 sibling 宿主，见下）
 ```
 
-当前插件：`codegraph`（代码图谱，v2.0.1）。
+当前插件：
+
+- `codegraph`（代码图谱，v2.0.1）
+- `office-pro`（office 文档生成代码工坊：run_js 沙箱执行 + office-authoring 方法论 + 文档工程师预置；vendor 需先跑 `plugins/office-pro/scripts/build.sh` 构建）
+
+office-pro 说明：其 `run-js` / `generation-smoke` 测试依赖宿主的 `execSandboxed` 设施（office-pro 分支引入，截至 2026-11-03 尚未合入 main）——分支合并前这两组测试自动 skip，合并后自愈全绿。
 
 ## 开发工作流
 
