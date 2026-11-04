@@ -63,6 +63,9 @@ const momoChart = require(path.join(PLUGIN_ROOT, 'vendor/momo-libs/momo-chart/in
   buildChartXml: (data: ChartData) => string;
   injectXlsxChart: (buf: Buffer, spec: XlsxChartSpec) => Buffer;
 };
+const momoValidate = require(path.join(PLUGIN_ROOT, 'vendor/momo-libs/momo-validate/index.js')) as {
+  validateOfficeFile: (abs: string) => { ok: boolean; errors: string[] };
+};
 const momoPptxZip = require(path.join(PLUGIN_ROOT, 'vendor/momo-libs/momo-pptx-zip/index.js')) as {
   fillPptTemplate: (templateBuf: Buffer, slides: PptSlideFill[]) => Buffer;
 };
@@ -154,6 +157,91 @@ describe.skipIf(!VENDOR_REAL)('momo-chart（自 chart-xml.ts 移植）', () => {
       anchor: { from: { col: 0, row: 0 }, to: { col: 6, row: 15 } },
       chart: { type: 'bar', series: [SERIES_A] },
     })).toThrow(/sheet 不存在/);
+  });
+
+  // —— P1-5 修复（深度审查质量线 MAJOR-1/2）——
+  // 入口信任缺口：type 无运行时校验（switch 无 default → 非法值静默产出空图表
+  // 体，且曾能过校验直达用户）；catRef/valRef 裸传双轨把 OOXML 引用规则 quiz
+  // 留给 LLM。修：入口 assert + ref 归一化（未引号表名一律自动改写为引号形态
+  // ——Excel 恒接受引号，零误报地消灭整类写错事故）。
+  it('injectXlsxChart：非法 type → 入口报错（含合法值清单）', async () => {
+    const buf = await makeXlsxBuffer();
+    expect(() => momoChart.injectXlsxChart(buf, {
+      sheetName: '数据',
+      anchor: { from: { col: 0, row: 0 }, to: { col: 6, row: 15 } },
+      chart: { type: 'scatter' as never, series: [SERIES_A] },
+    })).toThrow(/非法图表类型.*bar/);
+  });
+
+  it('injectXlsxChart：series 空数组 → 入口报错', async () => {
+    const buf = await makeXlsxBuffer();
+    expect(() => momoChart.injectXlsxChart(buf, {
+      sheetName: '数据',
+      anchor: { from: { col: 0, row: 0 }, to: { col: 6, row: 15 } },
+      chart: { type: 'bar', series: [] },
+    })).toThrow(/series/);
+  });
+
+  it('buildChartXml：ref 归一化——未引号表名自动加引号，已引号透传，内部引号双写', () => {
+    const xml = momoChart.buildChartXml({
+      type: 'bar',
+      series: [
+        { ...SERIES_A, catRef: '数据!$A$2:$A$4', valRef: '数据!$B$2:$B$4' },
+        { ...SERIES_A, nameLiteral: '已引号', catRef: "'Bob''s 表'!$A$2:$A$4", valRef: "'月度'!$B$2:$B$4" },
+      ],
+    });
+    expect(xml).toContain("<c:f>'数据'!$A$2:$A$4</c:f>");
+    expect(xml).toContain("<c:f>'数据'!$B$2:$B$4</c:f>");
+    expect(xml).toContain("<c:f>'Bob''s 表'!$A$2:$A$4</c:f>");
+    expect(xml).toContain("<c:f>'月度'!$B$2:$B$4</c:f>");
+  });
+
+  it('buildChartXml：ref 缺 ! 分隔 → 明确报错附示例', () => {
+    expect(() => momoChart.buildChartXml({
+      type: 'bar',
+      series: [{ ...SERIES_A, catRef: '数据', valRef: '$A$1' }],
+    })).toThrow(/非法图表引用/);
+  });
+
+  // 2026-11-04 回归锁（实锤：销售利润跟踪表.xlsx——Office 打开报「修复或删除
+  // 不可读取的内容」且首个页签被丢）：exceljs 收尾的顶层 extLst（x14 条件格式
+  // 尾块）存在时，「</worksheet> 前直插」产出 extLst→drawing 逆序，违反
+  // CT_Worksheet 元素序（drawing 必须在 extLst 前，extLst 永远垫底）——MS Excel
+  // 严格解析判部件损坏，修复时丢弃整个 sheet。注入必须落在顶层尾块 extLst 之前。
+  it('injectXlsxChart：sheet 带顶层尾块 extLst → drawing 插其前（CT_Worksheet 序）', async () => {
+    const buf = await makeXlsxBuffer();
+    // 底座改造为生产同形：收尾追加顶层 extLst 尾块（嵌套 extLst 场景由生产实锤覆盖）
+    const zip = new AdmZip(buf);
+    const sheetEntry = zip.getEntries().find((e) => e.entryName === 'xl/worksheets/sheet1.xml')!;
+    const baseXml = zip.readAsText(sheetEntry);
+    const withTailExt = baseXml.replace(
+      /<\/worksheet>$/,
+      '<extLst><ext xmlns:x14="urn:x14"><x14:conditionalFormatting><x14:cf>dataBar</x14:cf></x14:conditionalFormatting></ext></extLst></worksheet>',
+    );
+    zip.updateFile(sheetEntry, Buffer.from(withTailExt, 'utf8'));
+
+    const out = momoChart.injectXlsxChart(zip.toBuffer(), {
+      sheetName: '数据',
+      anchor: { from: { col: 3, row: 1 }, to: { col: 9, row: 16 } },
+      chart: { type: 'bar', title: '季度销量', series: [SERIES_A] },
+    });
+
+    const xml = new AdmZip(out).readAsText('xl/worksheets/sheet1.xml');
+    const drawingIdx = xml.indexOf('<drawing');
+    const topExtIdx = xml.lastIndexOf('<extLst');
+    expect(drawingIdx).toBeGreaterThan(-1);
+    expect(topExtIdx).toBeGreaterThan(-1);
+    // 序断言：drawing 在顶层 extLst 之前（schema 正确位）
+    expect(drawingIdx).toBeLessThan(topExtIdx);
+    // 注入产物 exceljs 仍可重开（未破坏底座）
+    const reopen = new ExcelJS!.Workbook();
+    await reopen.xlsx.load(out as unknown as ArrayBuffer);
+    // 交付门禁闭环：产物必须过 momo-validate 序校验（生成器与门禁双锁）
+    const tmpPath = path.join(os.tmpdir(), `momo-chart-gate-${Date.now()}.xlsx`);
+    fs.writeFileSync(tmpPath, out);
+    const verdict = momoValidate.validateOfficeFile(tmpPath);
+    fs.rmSync(tmpPath, { force: true });
+    expect(verdict.ok).toBe(true);
   });
 
   it('fillPptTemplate：替换发生 + 输出过 momo-validate + 模板语义', async () => {

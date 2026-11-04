@@ -154,13 +154,30 @@ function sheetAbsRef(sheet, range) {
 const CAT_AX_ID = '111111111';
 const VAL_AX_ID = '222222222';
 
+// 支持的图表类型（injectXlsxChart 入口校验用；JSDoc 联合类型是纯注释无运行时约束）
+const CHART_TYPES = new Set(['bar', 'bar_h', 'line', 'pie']);
+
+/**
+ * 图表引用归一化（深度审查 P1-5）：'sheet'!range 一律重写为引号表名形态——
+ * Excel 恒接受引号（含简单名），未引号裸传曾实锤产出待修复文件。已引号透传
+ * （内部 ' 双写保真）；缺 '!' 分隔的畸形引用报错附示例。
+ */
+function normalizeSheetRef(ref) {
+  const m = /^('(?:[^']|'')*'|[^'!]+)!(.*)$/.exec(String(ref));
+  if (m === null) {
+    throw new Error(`非法图表引用: "${ref}"（示例：'月度总览'!$A$4:$A$13）`);
+  }
+  const sheet = m[1].startsWith("'") ? m[1].slice(1, -1).replace(/''/g, "'") : m[1];
+  return `'${sheet.replace(/'/g, "''")}'!${m[2]}`;
+}
+
 /** @param {ChartSeriesData} s @returns {string} */
 function buildTxXml(s) {
   if (s.nameRef !== undefined) {
     const cacheXml = s.nameCache !== undefined
       ? `<c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>${xmlEscape(s.nameCache)}</c:v></c:pt></c:strCache>`
       : '';
-    return `<c:tx><c:strRef><c:f>${xmlEscape(s.nameRef)}</c:f>${cacheXml}</c:strRef></c:tx>`;
+    return `<c:tx><c:strRef><c:f>${xmlEscape(normalizeSheetRef(s.nameRef))}</c:f>${cacheXml}</c:strRef></c:tx>`;
   }
   if (s.nameLiteral !== undefined) {
     return `<c:tx><c:v>${xmlEscape(s.nameLiteral)}</c:v></c:tx>`;
@@ -234,7 +251,7 @@ function buildStrCacheXml(values) {
 function buildCatXml(s) {
   return `<c:cat>
     <c:strRef>
-      <c:f>${xmlEscape(s.catRef)}</c:f>
+      <c:f>${xmlEscape(normalizeSheetRef(s.catRef))}</c:f>
       ${buildStrCacheXml(s.catCache)}
     </c:strRef>
   </c:cat>`;
@@ -244,7 +261,7 @@ function buildCatXml(s) {
 function buildValXml(s) {
   return `<c:val>
     <c:numRef>
-      <c:f>${xmlEscape(s.valRef)}</c:f>
+      <c:f>${xmlEscape(normalizeSheetRef(s.valRef))}</c:f>
       ${buildNumCacheXml(s.valCache)}
     </c:numRef>
   </c:val>`;
@@ -344,6 +361,8 @@ function buildChartTypeBody(data) {
       return buildLineChartBody(data);
     case 'pie':
       return buildPieChartBody(data);
+    default:
+      throw new Error(`非法图表类型: ${String(data.type)}（支持 bar/bar_h/line/pie）`);
   }
 }
 
@@ -614,6 +633,28 @@ function ensureRelNamespace(sheetXml) {
   return sheetXml.replace(/<worksheet\b/, `<worksheet xmlns:r="${REL_NS}"`);
 }
 
+/**
+ * drawing 标签插入 sheet XML 的 schema 正确位置（CT_Worksheet 元素序：drawing
+ * 必须在 extLst 之前，extLst 永远垫底）。直接「</worksheet> 前插」在 sheet 带
+ * 顶层尾块 extLst（exceljs 的 x14 条件格式收尾）时产出 extLst→drawing 逆序——
+ * MS Excel 严格解析判部件损坏，修复时丢弃整个 sheet（2026-11-04 实锤：产物
+ * 打开报「修复或删除不可读取的内容」且首个页签消失）。
+ * 实现：lastIndexOf 定位尾块 extLst，验证其到 </worksheet> 前无其他顶层元素
+ * 则插其前；否则退回 </worksheet> 前插。嵌套 extLst（cfRule 内等）先于尾块
+ * 闭合，lastIndexOf 不会误中。
+ */
+function insertDrawingTag(sheetXml, tag) {
+  const extIdx = sheetXml.lastIndexOf('<extLst');
+  const closeIdx = sheetXml.lastIndexOf('</worksheet>');
+  if (extIdx !== -1 && extIdx < closeIdx) {
+    const tail = sheetXml.slice(extIdx);
+    if (/^<extLst\b[\s\S]*<\/extLst>\s*<\/worksheet>\s*$/.test(tail)) {
+      return sheetXml.slice(0, extIdx) + tag + sheetXml.slice(extIdx);
+    }
+  }
+  return sheetXml.replace(/<\/worksheet>/, `${tag}</worksheet>`);
+}
+
 /** ContentTypes 补缺失 Override（按 PartName 去重；[Content_Types].xml 缺失时跳过） */
 function appendContentOverrides(zip, overrides) {
   if (overrides.length === 0) return;
@@ -776,7 +817,7 @@ function restoreChartParts(buf, snap) {
       }
     }
     const xml = ensureRelNamespace(zip.readAsText(sheet));
-    zip.updateFile(sheet, Buffer.from(xml.replace(/<\/worksheet>/, `${finalTag}</worksheet>`), 'utf8'));
+    zip.updateFile(sheet, Buffer.from(insertDrawingTag(xml, finalTag), 'utf8'));
   }
 
   appendContentOverrides(zip, snap.contentOverrides);
@@ -873,7 +914,7 @@ function injectCharts(buf, sheetFile, charts) {
     const sheetXml = ensureRelNamespace(zip.readAsText(sheetFile));
     zip.updateFile(
       sheetFile,
-      Buffer.from(sheetXml.replace(/<\/worksheet>/, `<drawing r:id="${sheetRid}"/></worksheet>`), 'utf8'),
+      Buffer.from(insertDrawingTag(sheetXml, `<drawing r:id="${sheetRid}"/>`), 'utf8'),
     );
     newOverrides.push(drawingOverrideXml(drawingFile));
   } else {
@@ -903,6 +944,14 @@ function injectCharts(buf, sheetFile, charts) {
  * @returns {Buffer}
  */
 function injectXlsxChart(xlsxBuffer, spec) {
+  // 入口校验（深度审查 P1-5）：type/series 是 LLM 直传面，非法值此前静默产出
+  // 空图表体（switch 无 default）直达用户
+  if (!CHART_TYPES.has(spec.chart.type)) {
+    throw new Error(`非法图表类型: ${String(spec.chart.type)}（支持 bar/bar_h/line/pie）`);
+  }
+  if (!Array.isArray(spec.chart.series) || spec.chart.series.length === 0) {
+    throw new Error('series 不能为空（图表至少一个序列）');
+  }
   const zip = new AdmZip(xlsxBuffer);
   const sheetFile = resolveSheetFile(zip, spec.sheetName);
   if (sheetFile === null) throw new Error(`sheet 不存在: ${spec.sheetName}`);
