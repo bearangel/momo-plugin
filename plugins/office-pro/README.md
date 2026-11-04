@@ -43,8 +43,9 @@ momo-libs 为插件自有代码（纯 CJS，随 git 提交），无需构建—�
 
 ## Windows 安全基线
 
-Windows 平台无 OS 级命令沙箱（macOS Seatbelt / Linux bubblewrap 均不可用），降级为 PowerShell plain 执行。office-pro 对此的补偿基线：
+Windows 平台无 OS 级命令沙箱（macOS Seatbelt / Linux bubblewrap 均不可用），降级为 plain 执行。office-pro 对此的补偿基线（bootstrap 层，2026-11-04 深度审查后收口）：
 
-- **bootstrap fs 守卫**：脚本执行前注入文件系统守卫，限制写入目标只能是工作区产物目录，阻断路径逃逸（`..` / 绝对路径外写）
-- **对齐 bash 策略**：出站网络与 bash 工具共用同一双态策略（允许 / 拒绝），默认拒绝
-- **产物自查**：所有文档产物经 momo-validate 校验后才向 agent 返回成功，损坏/越权写入在收工时暴露
+- **fs 双向守卫**：写仅限工作区与系统 tmp（符号链接/悬空链逐级解引用至真实落点断言，防穿透）；读仅限工作区/tmp/vendor/脚本本体（阻断「读敏感文件 + stdout 回传 LLM」的 exfil 通道）。仅覆盖同进程 fs 调用，stat/access 类信息探测为已声明残留
+- **进程能力封禁**：child_process / worker_threads / net / http(s) / tls / dgram / dns / cluster 一律拒载（含 `node:` 前缀），`process.binding` / `process.dlopen` / `require('*.node')` 全封——win32 下本层为主要防线；已知残留：动态 `import()` 走 ESM 装载器不经此层，macOS/Linux 由 OS 沙箱兜底
+- **网络现实**：win32 无网络强制（与 bash 同基线）；macOS/Linux 在 OS 层 net-off
+- **产物自查（agent 纪律层）**：run_js 的 DEF/skill 规定收工前必须 `momo-validate` 校验产物（元素序/必需元素/rels 链/索引越界/字符间距红线 + pdf 头尾）——这是提示词纪律而非工具强制拦截，校验不通过时产物不应声称交付完成

@@ -53,7 +53,13 @@ tags: [office, pptx, xlsx, docx, pdf]
 ## 4. docx / pdfkit
 
 - docx：`new Document({ sections: [{ children: [new Paragraph(...), new Table(...)] }] })` → `Packer.toBuffer` → fs 写盘
-- pdfkit 中文**必须内嵌字体**，否则乱码：优先检查 pdfkit 内置注册字体；无中文字体时向用户说明改用 docx
+- pdfkit 中文**必须内嵌字体**（否则乱码）：`vendor/fonts/NotoSansSC-Regular.ttf` 已随插件供给（build.sh 自动就位），注册写法见下方代码；字体缺失（build.sh 下载失败且宿主无源）时向用户说明改用 docx
+  ```js
+  const path = require('node:path');
+  const vendorRoot = process.argv[4]; // bootstrap argv: [exe, run.js, ws, script, vendorRoot]
+  const fontPath = path.join(vendorRoot, 'fonts', 'NotoSansSC-Regular.ttf');
+  const doc = new PDFDocument({ font: fontPath }); // 或 doc.font(fontPath)
+  ```
 - pdfkit 无自动表格：手动画行（moveTo/lineTo）或逐 cell 定位
 
 ## 5. 设计规范（反「AI 味」红线）

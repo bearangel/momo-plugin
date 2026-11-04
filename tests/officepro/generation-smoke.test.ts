@@ -172,4 +172,59 @@ describe.skipIf(!HOST_READY || !EXEC_READY || !VENDOR_REAL)('office-pro 生成�
     expect(r).toContain('VALIDATE={"ok":true');
     expect(fs.existsSync(path.join(wsDir, 'smoke.xlsx'))).toBe(true);
   });
+
+  // 四格式章程补全（深度审查 context 线：docx/pdf 曾零冒烟）
+  it('docx：run_js 产出 Word → momo-validate ok + 记账', { timeout: 90000 }, async () => {
+    const m = loadTools();
+    const ctx = mkCtx();
+    const r = await m.execute('plugin:office-pro/run_js', {
+      script: `
+        const fs = require('fs');
+        const { Document, Packer, Paragraph } = require('docx');
+        const doc = new Document({ sections: [{ children: [new Paragraph('冒烟文档：docx 生成链路')] }] });
+        fs.writeFileSync('smoke.docx', await Packer.toBuffer(doc));
+        const { validateOfficeFile } = require('momo-validate');
+        console.log('VALIDATE=' + JSON.stringify(validateOfficeFile(require('path').resolve('smoke.docx'))));
+      `,
+      outputs: ['smoke.docx'],
+      timeout_ms: 60000,
+    }, ctx);
+    expect(r).toContain('退出码=0');
+    expect(r).toContain('VALIDATE={"ok":true');
+    expect(r).toContain('smoke.docx: create 已记账');
+    expect(fs.existsSync(path.join(wsDir, 'smoke.docx'))).toBe(true);
+  });
+
+  it('pdfkit + 中文字体（Noto Sans SC 随 vendor 供给）→ pdf 门禁通过', { timeout: 90000 }, async () => {
+    const m = loadTools();
+    const ctx = mkCtx();
+    const r = await m.execute('plugin:office-pro/run_js', {
+      script: `
+        const fs = require('fs');
+        const path = require('path');
+        const PDFDocument = require('pdfkit');
+        const fontPath = path.join(process.argv[4], 'fonts', 'NotoSansSC-Regular.ttf');
+        if (!fs.existsSync(fontPath)) { console.log('FONT=MISSING'); }
+        else {
+          const ws = fs.createWriteStream('smoke.pdf');
+          const doc = new PDFDocument({ font: fontPath });
+          doc.pipe(ws);
+          doc.fontSize(14).text('中文冒烟：销售利润跟踪', 72, 72);
+          doc.end();
+          // 等写盘流 finish（pdfkit 'end' 只表示文档流结束，落盘可能未刷完）
+          await new Promise((res) => ws.on('finish', res));
+          const { validateOfficeFile } = require('momo-validate');
+          console.log('VALIDATE=' + JSON.stringify(validateOfficeFile(path.resolve('smoke.pdf'))));
+        }
+      `,
+      outputs: ['smoke.pdf'],
+      timeout_ms: 60000,
+    }, ctx);
+    if (r.includes('FONT=MISSING')) return; // build.sh 字体供给缺席（离线且无宿主源）——已知降级路径
+    expect(r).toContain('退出码=0');
+    expect(r).toContain('VALIDATE={"ok":true');
+    expect(fs.existsSync(path.join(wsDir, 'smoke.pdf'))).toBe(true);
+    const head = fs.readFileSync(path.join(wsDir, 'smoke.pdf')).subarray(0, 5).toString('latin1');
+    expect(head).toBe('%PDF-');
+  });
 });
