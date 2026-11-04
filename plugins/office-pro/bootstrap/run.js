@@ -64,29 +64,91 @@ if (vendorMissing.length > 0) {
   process.exit(3);
 }
 const origResolve = Module._resolveFilename;
+// 能力封禁（深度审查 P0-2，2026-11-04 实测实锤：child_process.execSync 可写家目录）：
+// 进程/线程/网络族模块一律拒载。堵 Module._load（require 总入口）而非仅
+// _resolveFilename——`node:` 前缀请求走内建快速通道不经过解析器，只堵解析器
+// 拦不住前缀形态（实测实证）。残留面：动态 import() 走 ESM 装载器不经此层，
+// 由宿主 OS 沙箱（seatbelt/bwrap）兜底；win32 无 OS 沙箱，为已声明残留。
+const DENY_MODULES = new Set([
+  'child_process', 'worker_threads', 'net', 'http', 'https', 'tls',
+  'dgram', 'dns', 'cluster',
+  'node:child_process', 'node:worker_threads', 'node:net', 'node:http',
+  'node:https', 'node:tls', 'node:dgram', 'node:dns', 'node:cluster',
+]);
+const origLoad = Module._load;
+Module._load = function guardedLoad(request, parent, isMain) {
+  if (DENY_MODULES.has(request)) {
+    throw new Error(`沙箱禁用模块: ${request}（进程/线程/网络能力不可用——离线文档工坊不需要它们）`);
+  }
+  return origLoad.call(this, request, parent, isMain);
+};
 Module._resolveFilename = function patched(request, ...rest) {
   if (Object.prototype.hasOwnProperty.call(VENDOR_LIBS, request)) {
     return vendorEntry(request);
   }
   return origResolve.call(this, request, ...rest);
 };
+// 原生代码旁路全封：process.binding（内部 binding）、process.dlopen（显式加载
+// .node）、Module._extensions['.node']（require('*.node') 加载路径）。64KB 脚本
+// 可内嵌微型 .node blob 落盘 workspace 再 dlopen——进程内 JS 守卫对其全部失效。
+process.binding = function deniedBinding() {
+  throw new Error('沙箱禁用 process.binding（内部 binding 不可达）');
+};
+if (typeof process.dlopen === 'function') {
+  process.dlopen = function deniedDlopen() {
+    throw new Error('沙箱禁用 process.dlopen（原生模块不可加载）');
+  };
+}
+Module._extensions['.node'] = function deniedNative(_module, filename) {
+  throw new Error(`沙箱禁用原生模块加载: ${filename}`);
+};
 
-// ② fs 写守卫：写目标仅允许 workspace 与 tmpdir（读不限）。
-//    前缀按 realpath 归一（macOS /var→/private/var、/tmp→/private/tmp 符号链接，
-//    path.resolve 相对路径走 getcwd 真实路径，词法前缀会误拒）；目标不存在时
-//    realpath 失败则回退词法比较。
+// ② fs 守卫：写仅 workspace/tmp；读限 workspace/tmp/vendor/脚本本体（深度审查
+//    P0-1/P0-3 收口）。前缀按 realpath 归一（macOS /var→/private/var 符号链接，
+//    词法前缀会误拒误放）。路径判定不再短路：叶面符号链接（含悬空链）逐级解
+//    引用到真实落点再断言——旧实现「词法命中即放行」使 workspace 内建 symlink
+//    指向外部后 writeFileSync 穿透落盘（2026-11-04 实测实锤，两行代码写任意
+//    用户文件）；悬空链同理（realpath 对缺失路径回退词法的老缺陷一并消除）。
 function realPath(p) {
   try { return fs.realpathSync(p); } catch (_e) { return p; }
 }
 const WRITE_PREFIXES = [path.resolve(workspaceDir), os.tmpdir()].map((p) => realPath(p) + path.sep);
-function assertWritable(target) {
-  const abs = path.resolve(String(target));
-  if (WRITE_PREFIXES.some((pre) => abs.startsWith(pre))) return;
-  const real = realPath(abs);
-  if (real !== abs && WRITE_PREFIXES.some((pre) => real.startsWith(pre))) return;
-  throw new Error(`沙箱写守卫拒绝（仅 workspace/tmp 可写）: ${abs}`);
+const READ_PREFIXES = [path.resolve(workspaceDir), os.tmpdir(), path.resolve(vendorRoot), path.resolve(scriptPath)]
+  .map((p) => realPath(p) + path.sep);
+
+/**
+ * 守卫用路径解析：叶面符号链接链（≤8 级防环）解引用至真实目标；目标不存在时
+ * 按「已存在最近祖先 realpath + 余段」解析（悬空链/新建文件都落到真实前缀域）。
+ */
+function resolveForGuard(target) {
+  let abs = path.resolve(String(target));
+  for (let i = 0; i < 8; i += 1) {
+    let st = null;
+    try { st = fs.lstatSync(abs); } catch (_e) { break; }
+    if (st === null || !st.isSymbolicLink()) break;
+    let dest = null;
+    try { dest = fs.readlinkSync(abs); } catch (_e) { break; }
+    abs = path.resolve(path.dirname(abs), dest);
+  }
+  try { return fs.realpathSync(abs); } catch (_e) { /* 目标不存在 → 祖先解析 */ }
+  const parent = path.dirname(abs);
+  if (parent === abs) return abs;
+  try { return path.join(fs.realpathSync(parent), path.basename(abs)); } catch (_e) { return abs; }
 }
-const FS_SYNC_FIRST = ['writeFileSync', 'appendFileSync', 'unlinkSync', 'mkdirSync', 'rmSync', 'truncateSync'];
+
+function assertWritable(target) {
+  const real = resolveForGuard(target);
+  if (WRITE_PREFIXES.some((pre) => real.startsWith(pre))) return;
+  throw new Error(`沙箱写守卫拒绝（仅 workspace/tmp 可写）: ${path.resolve(String(target))}`);
+}
+
+function assertReadable(target) {
+  const real = resolveForGuard(target);
+  if (READ_PREFIXES.some((pre) => real.startsWith(pre))) return;
+  throw new Error(`沙箱读守卫拒绝（仅 workspace/tmp/vendor/脚本可读）: ${path.resolve(String(target))}`);
+}
+// 写族补口（深度审查 F4）：rmdir 删除语义与 chmod/utimes 元数据写一并收口。
+const FS_SYNC_FIRST = ['writeFileSync', 'appendFileSync', 'unlinkSync', 'mkdirSync', 'rmSync', 'truncateSync', 'rmdirSync', 'chmodSync', 'lchmodSync', 'utimesSync', 'lutimesSync'];
 const FS_SYNC_DST = ['renameSync', 'copyFileSync'];
 for (const name of FS_SYNC_FIRST) {
   const orig = fs[name];
@@ -99,7 +161,7 @@ for (const name of FS_SYNC_DST) {
   fs[name] = function guarded(src, dst, ...args) { assertWritable(dst); return orig.call(fs, src, dst, ...args); };
 }
 const fsp = fs.promises;
-const FS_ASYNC_FIRST = ['writeFile', 'appendFile', 'unlink', 'mkdir', 'rm', 'truncate'];
+const FS_ASYNC_FIRST = ['writeFile', 'appendFile', 'unlink', 'mkdir', 'rm', 'truncate', 'rmdir', 'chmod', 'lchmod', 'utimes', 'lutimes'];
 const FS_ASYNC_DST = ['rename', 'copyFile'];
 for (const name of FS_ASYNC_FIRST) {
   const orig = fsp[name];
@@ -126,6 +188,7 @@ const origOpenSync = fs.openSync;
 fs.openSync = function guardedOpenSync(p, flags, ...args) {
   const write = isWriteFlags(flags);
   if (write) assertWritable(p);
+  else assertReadable(p); // 读意图同样过守卫（P0-3：经 open 句柄读沙箱外即 exfil）
   const fd = origOpenSync.call(fs, p, flags, ...args);
   if (write) allowedWriteFds.add(fd);
   return fd;
@@ -134,6 +197,7 @@ const origOpenAsync = fsp.open;
 fsp.open = async function guardedOpen(p, flags, ...args) {
   const write = isWriteFlags(flags);
   if (write) assertWritable(p);
+  else assertReadable(p);
   const fh = await origOpenAsync.apply(fsp, [p, flags, ...args]);
   // 写意图 open 的 FileHandle.fd 同样登记（终审复审 #1：否则 fh.fd 经
   // fs.writeSync 写会被 fd 白名单误杀，与 openSync 路径行为不一致）
@@ -166,7 +230,7 @@ fs.createWriteStream = function guardedCreateWriteStream(p, ...args) {
 
 // callback 形态（终审 B1）：fs.writeFile(path, data, cb) 等回调 API 与 sync/promises
 // 同语义守卫——路径在首参，rename/copyFile 查目标（第 2 参）。
-const FS_CB_FIRST = ['writeFile', 'appendFile', 'unlink', 'mkdir', 'rm', 'rmdir', 'truncate'];
+const FS_CB_FIRST = ['writeFile', 'appendFile', 'unlink', 'mkdir', 'rm', 'rmdir', 'truncate', 'chmod', 'lchmod', 'utimes', 'lutimes'];
 const FS_CB_DST = ['rename', 'copyFile'];
 for (const name of FS_CB_FIRST) {
   const orig = fs[name];
@@ -178,6 +242,33 @@ for (const name of FS_CB_DST) {
   if (typeof orig !== 'function') continue;
   fs[name] = function guardedCb(src, dst, ...args) { assertWritable(dst); return orig.call(fs, src, dst, ...args); };
 }
+
+// 读族守卫（P0-3：读零限制 = readFileSync 任意路径 + stdout 回传 LLM 的 exfil
+// 通道）。白名单经 assertReadable（workspace/tmp/vendor/脚本本体）；fd 读经
+// open 读意图门控传递覆盖；stat/access 信息探测为已声明残留面，不判。
+const FS_READ_SYNC = ['readFileSync', 'readdirSync', 'opendirSync'];
+const FS_READ_CB = ['readFile', 'readdir', 'opendir'];
+for (const name of FS_READ_SYNC) {
+  const orig = fs[name];
+  if (typeof orig !== 'function') continue;
+  fs[name] = function guardedRead(p, ...args) { assertReadable(p); return orig.call(fs, p, ...args); };
+}
+for (const name of FS_READ_CB) {
+  const orig = fs[name];
+  if (typeof orig !== 'function') continue;
+  fs[name] = function guardedReadCb(p, ...args) { assertReadable(p); return orig.call(fs, p, ...args); };
+}
+for (const name of [...FS_READ_SYNC, ...FS_READ_CB]) {
+  const orig = fsp[name];
+  if (typeof orig !== 'function') continue;
+  fsp[name] = function guardedReadAsync(p, ...args) { assertReadable(p); return orig.apply(fsp, [p, ...args]); };
+}
+const origCreateReadStream = fs.createReadStream;
+fs.createReadStream = function guardedCreateReadStream(p, ...args) {
+  const target = p && typeof p === 'object' && !Buffer.isBuffer(p) && 'path' in p ? p.path : p;
+  assertReadable(target);
+  return origCreateReadStream.call(fs, p, ...args);
+};
 
 // 链接族：只查新建链接的落点（各 API 第 2 参）——symlink 的 target 指向
 // 沙箱外是合法用途（引用既有文件），链接本身必须落在沙箱内。

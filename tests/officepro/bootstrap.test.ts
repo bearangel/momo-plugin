@@ -138,7 +138,7 @@ describe('bootstrap 沙箱入口', () => {
     expect(r.stdout).not.toContain('SHOULD-NOT-PASS');
   });
 
-  it('fd 族：openSync 沙箱内写放行；只读 flags 不触发守卫（ENOENT 而非守卫错误）', async () => {
+  it('fd 族：openSync 沙箱内写放行；只读 flags 越界 → 读守卫拒绝（P0-3 收口后语义）', async () => {
     const outside = path.join(path.parse(tmp).root, 'momo-boot-missing-r.txt');
     const r = await run(
       `const fs = require('fs');
@@ -146,14 +146,13 @@ describe('bootstrap 沙箱入口', () => {
        fs.writeSync(fd, 'fd-data');
        fs.closeSync(fd);
        try { fs.openSync(${JSON.stringify(outside)}, 'r'); console.log('SHOULD-NOT-PASS'); }
-       catch (e) { console.log('READ-PASSED:' + e.code); }
+       catch (e) { console.log('READ-GUARDED:' + e.message.slice(0, 9)); }
        console.log('fd-ok');`,
     );
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('fd-ok');
-    expect(r.stdout).toContain('READ-PASSED:ENOENT');
+    expect(r.stdout).toContain('READ-GUARDED:沙箱读守卫拒绝');
     expect(r.stdout).not.toContain('SHOULD-NOT-PASS');
-    expect(r.stdout).not.toContain('沙箱写守卫拒绝');
     expect(fs.readFileSync(path.join(ws, 'fd-ok.txt'), 'utf-8')).toBe('fd-data');
   });
 
@@ -239,5 +238,137 @@ describe('bootstrap 沙箱入口', () => {
     expect((r.stdout.match(/GUARDED:沙箱写守卫拒绝/g) ?? []).length).toBe(2);
     expect(r.stdout).toContain('plink-ok');
     expect(r.stdout).not.toContain('SHOULD-NOT-PASS');
+  });
+
+  // —— 深度审查 P0 收口（2026-11-04 实测实锤回归锁）——
+  // ① 写守卫短路穿透：词面前缀命中即放行 + workspace 内 symlink 指向沙箱外 →
+  //    writeFileSync 穿透落盘（实测两行代码写任意用户文件）；悬空 symlink 同穿透
+  // ② 进程能力零封禁：child_process.execSync 实测写家目录（win32/permissive 无 OS 兜底）
+  // ③ 读零限制：readFileSync 任意路径 + stdout 回传 LLM = 现成 exfil 通道
+  describe('bootstrap 安全收口（深度审查 P0）', () => {
+    const homeCanary = (name: string): string => path.join(os.homedir(), name);
+
+    it('① workspace 内 symlink 指向沙箱外：写穿透被拦（非悬空 + 悬空两形态）', async () => {
+      const target = homeCanary('momo-p0-symlink-target.txt');
+      const dangling = homeCanary('momo-p0-symlink-dangling.txt');
+      // 前置双向清理：修复前的红跑会穿透创建悬空靶（历史残留会假红）
+      fs.rmSync(target, { force: true });
+      fs.rmSync(dangling, { force: true });
+      fs.writeFileSync(target, 'pre');
+      const r = await run(
+        `const fs = require('node:fs');
+         fs.symlinkSync(${JSON.stringify(target)}, 'lnk1');
+         fs.symlinkSync(${JSON.stringify(dangling)}, 'lnk2');
+         for (const l of ['lnk1', 'lnk2']) {
+           try { fs.writeFileSync(l, 'ESCAPED'); console.log(l + ':WROTE'); }
+           catch (e) { console.log(l + ':BLOCKED'); }
+         }`,
+      );
+      expect(r.stdout).toContain('lnk1:BLOCKED');
+      expect(r.stdout).toContain('lnk2:BLOCKED');
+      expect(fs.readFileSync(target, 'utf-8')).toBe('pre');
+      expect(fs.existsSync(dangling)).toBe(false);
+      fs.rmSync(target, { force: true });
+      fs.rmSync(dangling, { force: true });
+    });
+
+    it('① 沙箱内 symlink 指向沙箱内 → 读写照常（合法形态不误伤）', async () => {
+      const r = await run(
+        `const fs = require('node:fs');
+         fs.writeFileSync('real.txt', 'inside');
+         fs.symlinkSync('real.txt', 'inner-lnk');
+         console.log('READ:' + fs.readFileSync('inner-lnk', 'utf8'));
+         fs.writeFileSync('inner-lnk', 'inside2');
+         console.log('WROTE-OK');`,
+      );
+      expect(r.stdout).toContain('READ:inside');
+      expect(r.stdout).toContain('WROTE-OK');
+    });
+
+    it('② 进程/线程/网络模块封禁（裸名与 node: 前缀两形态各自独立断言）', async () => {
+      const mods = ['child_process', 'worker_threads', 'net', 'http', 'https', 'tls', 'dgram', 'dns', 'cluster'];
+      // 两形态分置独立 try——塞同一 try 时裸名先抛会空过前缀形态（node: 前缀走
+      // 内建快速通道绕过解析器，实测曾漏拦；现堵 Module._load 总入口）
+      const checks = mods
+        .flatMap((m) => [m, `node:${m}`])
+        .map((full) =>
+          `try { require(${JSON.stringify(full)}); console.log(${JSON.stringify(full)} + ':LEAK'); }
+           catch (e) { console.log(${JSON.stringify(full)} + ':DENIED'); }`,
+        )
+        .join('\n');
+      const r = await run(checks);
+      expect(r.stdout).not.toContain(':LEAK');
+      expect((r.stdout.match(/:DENIED/g) ?? []).length).toBe(mods.length * 2);
+    });
+
+    it('② process.binding / process.dlopen / require("*.node") 封禁', async () => {
+      fs.writeFileSync(path.join(ws, 'evil.node'), Buffer.alloc(16));
+      const r = await run(
+        `try { process.binding('fs'); console.log('B:LEAK'); } catch (e) { console.log('B:DENIED'); }
+         try { process.dlopen(module, './evil.node'); console.log('D:LEAK'); } catch (e) { console.log('D:DENIED'); }
+         try { require('./evil.node'); console.log('N:LEAK'); } catch (e) { console.log('N:DENIED'); }`,
+      );
+      expect(r.stdout).toContain('B:DENIED');
+      expect(r.stdout).toContain('D:DENIED');
+      expect(r.stdout).toContain('N:DENIED');
+      fs.rmSync(path.join(ws, 'evil.node'), { force: true });
+    });
+
+    it('③ 读沙箱外被拦（readFileSync / promises.readFile / createReadStream / open r）', async () => {
+      const outside = homeCanary('momo-p0-read-probe.txt');
+      fs.writeFileSync(outside, 'secret');
+      const r = await run(
+        `const fs = require('node:fs');
+         const p = ${JSON.stringify(outside)};
+         try { fs.readFileSync(p); console.log('S1:LEAK'); } catch (e) { console.log('S1:DENIED'); }
+         try { fs.promises.readFile(p); console.log('S2:LEAK'); } catch (e) { console.log('S2:DENIED'); }
+         try { fs.createReadStream(p); console.log('S3:LEAK'); } catch (e) { console.log('S3:DENIED'); }
+         try { fs.openSync(p, 'r'); console.log('S4:LEAK'); } catch (e) { console.log('S4:DENIED'); }
+         try { fs.readFileSync(__filename, 'utf8'); console.log('S5:OK'); } catch (e) { console.log('S5:DENIED'); }`,
+      );
+      expect(r.stdout).toContain('S1:DENIED');
+      expect(r.stdout).toContain('S2:DENIED');
+      expect(r.stdout).toContain('S3:DENIED');
+      expect(r.stdout).toContain('S4:DENIED');
+      expect(r.stdout).toContain('S5:OK');
+      fs.rmSync(outside, { force: true });
+    });
+
+    it('④ 元数据/删除族补口：rmdirSync / chmodSync / utimesSync 越界被拦', async () => {
+      const outsideDir = homeCanary('momo-p0-dir');
+      const outsideFile = homeCanary('momo-p0-file.txt');
+      fs.mkdirSync(outsideDir, { recursive: true });
+      fs.writeFileSync(outsideFile, 'x');
+      const r = await run(
+        `const fs = require('node:fs');
+         try { fs.rmdirSync(${JSON.stringify(outsideDir)}, { recursive: true }); console.log('R:LEAK'); } catch (e) { console.log('R:DENIED'); }
+         try { fs.chmodSync(${JSON.stringify(outsideFile)}, 0o777); console.log('C:LEAK'); } catch (e) { console.log('C:DENIED'); }
+         try { fs.utimesSync(${JSON.stringify(outsideFile)}, new Date(), new Date()); console.log('U:LEAK'); } catch (e) { console.log('U:DENIED'); }`,
+      );
+      expect(r.stdout).toContain('R:DENIED');
+      expect(r.stdout).toContain('C:DENIED');
+      expect(r.stdout).toContain('U:DENIED');
+      expect(fs.lstatSync(outsideDir).isDirectory()).toBe(true);
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+      fs.rmSync(outsideFile, { force: true });
+    });
+
+    it('⑤ 合法路径全放行：写读 workspace、写 tmp、读 vendor（回归）', async () => {
+      const r = await run(
+        `const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
+         fs.writeFileSync('ws-rw.txt', 'ok');
+         console.log('WS:' + fs.readFileSync('ws-rw.txt', 'utf8'));
+         const t = path.join(os.tmpdir(), 'momo-p0-tmp-ok.txt');
+         fs.writeFileSync(t, 'ok');
+         console.log('TMP:OK');
+         const vendorRoot = process.argv[4];
+         fs.readFileSync(path.join(vendorRoot, 'node_modules', 'pptxgenjs', 'package.json'), 'utf-8');
+         console.log('VENDOR:OK');`,
+      );
+      expect(r.stdout).toContain('WS:ok');
+      expect(r.stdout).toContain('TMP:OK');
+      expect(r.stdout).toContain('VENDOR:OK');
+      fs.rmSync(path.join(os.tmpdir(), 'momo-p0-tmp-ok.txt'), { force: true });
+    });
   });
 });
