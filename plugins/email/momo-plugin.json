@@ -1,0 +1,13 @@
+{
+  "id": "email",
+  "name": "邮件",
+  "version": "0.1.0",
+  "description": "多邮箱收发助手：IMAP/SMTP 多账号管理 + 邮件面板 + agent 工具集与邮件助手预置",
+  "components": {
+    "tools": "./tools",
+    "service": "./service",
+    "skills": "./skills",
+    "agents": "./agents",
+    "panel": "./panel"
+  }
+}

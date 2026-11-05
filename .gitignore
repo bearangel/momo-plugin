@@ -3,3 +3,4 @@ plugins/codegraph/engine/
 plugins/codegraph/vendor/
 plugins/office-pro/vendor/node_modules/
 plugins/office-pro/vendor/fonts/
+plugins/*/vendor/node_modules/
