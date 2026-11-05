@@ -54,7 +54,7 @@
 </head>
 <body>
   <div class="col-left">
-    <div class="toolbar"><button class="pri" onclick="openAccountForm()">+ 添加账号</button></div>
+    <div class="toolbar"><button class="pri" onclick="openAccountForm('add')">+ 添加账号</button><button onclick="openAccountForm('edit')">编辑当前账号</button></div>
     <div id="folders"></div>
   </div>
   <div class="col-mid">
@@ -74,7 +74,7 @@
 
   <div id="account-form">
     <div class="box">
-      <b>添加邮箱账号</b>
+      <b id="account-form-title">添加邮箱账号</b>
       <label>常用预设</label>
       <select id="f-preset" onchange="applyPreset()"><option value="">— 选择或自定义 —</option><option value="qq">QQ 邮箱</option><option value="163">163 邮箱</option><option value="gmail">Gmail</option><option value="outlook">Outlook</option></select>
       <label>邮箱地址</label><input id="f-email" placeholder="you@example.com" oninput="applyPreset()">
@@ -144,7 +144,7 @@
   window.call = call;
 
   // 状态
-  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null, composeBusy: false };
+  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null, composeBusy: false, editId: null };
   var PRESETS = {
     qq: { ih: 'imap.qq.com', ip: 993, it: 'tls', sh: 'smtp.qq.com', sp: 465, st: 'tls' },
     '163': { ih: 'imap.163.com', ip: 993, it: 'tls', sh: 'smtp.163.com', sp: 465, st: 'tls' },
@@ -315,8 +315,37 @@
   }
 
   // —— 账号表单 ——
-  function openAccountForm() { S.testOk = false; $('f-retention').value = 'forever'; $('account-form').style.display = 'flex'; $('f-status').textContent = ''; }
-  function closeAccountForm() { $('account-form').style.display = 'none'; }
+  function openAccountForm(mode) {
+    var edit = mode === 'edit';
+    S.testOk = false;
+    S.editId = null;
+    ['f-email', 'f-name', 'f-user', 'f-ih', 'f-ip', 'f-sh', 'f-sp', 'f-pw'].forEach(function (id) { $(id).value = ''; });
+    $('f-preset').value = '';
+    $('f-it').value = 'tls';
+    $('f-st').value = 'tls';
+    $('f-retention').value = 'forever';
+    $('f-email').readOnly = false;
+    $('f-pw').placeholder = '授权码 / 应用密码（不回显，存系统钥匙串）';
+    $('account-form-title').textContent = edit ? '编辑邮箱账号' : '添加邮箱账号';
+    if (edit) {
+      if (!S.accId) { showListError('请先选择账号'); return; }
+      var a = (S.accounts || []).filter(function (x) { return x.id === S.accId; })[0];
+      if (!a) { showListError('请先选择账号'); return; }
+      S.editId = a.id;
+      $('f-email').value = a.email;
+      $('f-email').readOnly = true;
+      $('f-name').value = a.displayName || '';
+      $('f-user').value = a.username || '';
+      $('f-ih').value = a.imap.host; $('f-ip').value = a.imap.port; $('f-it').value = a.imap.tlsMode;
+      $('f-sh').value = a.smtp.host; $('f-sp').value = a.smtp.port; $('f-st').value = a.smtp.tlsMode;
+      $('f-retention').value = a.retention || 'forever';
+      $('f-pw').value = '';
+      $('f-pw').placeholder = '留空则不修改';
+    }
+    $('account-form').style.display = 'flex';
+    $('f-status').textContent = '';
+  }
+  function closeAccountForm() { S.editId = null; $('account-form').style.display = 'none'; }
   // 任何表单改动都使既有「测试通过」失效——保存前必须重新测试（spec §5.2）
   function resetTestOk() { S.testOk = false; }
   function applyPreset() {
@@ -348,7 +377,15 @@
   }
   function saveAccount() {
     if (S.testOk !== true) { $('f-status').className = 'status err'; $('f-status').textContent = '请先测试连接'; return; }
-    call('accounts.add', formInput()).then(function () { closeAccountForm(); boot(); })
+    var input = formInput();
+    if (S.editId) {
+      var patch = { displayName: input.displayName, username: input.username, retention: input.retention, imap: input.imap, smtp: input.smtp };
+      if (input.password !== '') patch.password = input.password;
+      call('accounts.update', { id: S.editId, patch: patch }).then(function () { closeAccountForm(); boot(); })
+        .catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
+      return;
+    }
+    call('accounts.add', input).then(function () { closeAccountForm(); boot(); })
       .catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
   }
   function delAccount() {
@@ -358,7 +395,7 @@
     var target = (S.accounts || []).filter(function (a) { return a.id === targetId; })[0];
     inlineConfirm('删除邮箱账号 ' + (target ? (target.displayName || target.email) : targetId) + '？（本地配置与凭据，不动服务器）').then(function (ok) {
       if (!ok) return;
-      call('accounts.delete', { id: targetId }).then(function () { if (S.accId === targetId) S.accId = null; boot(); })
+      call('accounts.delete', { id: targetId }).then(function () { S.editId = null; if (S.accId === targetId) S.accId = null; boot(); })
         .catch(function (e) { showListError('删除账号失败：' + e.message); });
     });
   }

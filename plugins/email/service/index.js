@@ -175,7 +175,10 @@ function buildService(deps) {
         }
       }
       if (!acc) throw new Error(`账号不存在: ${p.email}`);
-      const pw = await accountStore.getPassword(acc.id);
+      // 编辑态可传新密码直测；留空则用已存密码。
+      const pw = (typeof p.password === 'string' && p.password !== '')
+        ? p.password
+        : await accountStore.getPassword(acc.id);
       try {
         const conn = await smtpGuard('IMAP 连接', imapConnect(acc, pw));
         await conn.close();

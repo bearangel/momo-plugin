@@ -99,7 +99,11 @@ function createAccountStore({ dataDir, secrets }) {
       if (patch.smtp) checkEndpoint('smtp', { ...rows[i].smtp, ...patch.smtp });
       checkRetention(patch.retention);
       const next = { ...rows[i], ...patch, id: rows[i].id, createdAt: rows[i].createdAt };
-      delete next.password; // 永不经 update 落密码
+      // 非空密码才落 keychain；空串/未传 = 保留原值。密码永不入 JSON。
+      if (typeof patch.password === 'string' && patch.password !== '') {
+        await secrets.set('account:' + id, patch.password);
+      }
+      delete next.password;
       rows[i] = next;
       writeAll(rows);
       return next;

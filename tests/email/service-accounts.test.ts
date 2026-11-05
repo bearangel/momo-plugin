@@ -106,6 +106,26 @@ describe('accounts store', () => {
     await expect(store.update(a.id, { retention: 'bad' })).rejects.toThrow('retention');
   });
 
+  it('update：非空 password 写 keychain 且 JSON 无密码；空串不改', async () => {
+    const secrets = makeSecrets();
+    let sets = 0;
+    const baseSet = secrets.set.bind(secrets);
+    secrets.set = async (k: string, v: string) => { sets += 1; await baseSet(k, v); };
+    const store = createAccountStore({ dataDir: dir, secrets });
+    const a = await store.add({ email: 'a@b.c', username: 'a@b.c', password: 'p1',
+      imap: PRESETS.qq.imap, smtp: PRESETS.qq.smtp });
+    sets = 0;
+    await store.update(a.id, { password: 'new-pw', retention: '6m' });
+    expect(sets).toBe(1);
+    expect(secrets.m.get(`account:${a.id}`)).toBe('new-pw');
+    const raw = fs.readFileSync(path.join(dir, 'accounts.json'), 'utf-8');
+    expect(raw).not.toContain('new-pw');
+    expect(raw).not.toContain('"password"');
+    await store.update(a.id, { password: '' });
+    expect(sets).toBe(1);
+    await expect(store.update(a.id, { retention: 'bad' })).rejects.toThrow('retention');
+  });
+
   it('markHealth 落账号健康态', async () => {
     const store = createAccountStore({ dataDir: dir, secrets: makeSecrets() });
     const a = await store.add({ email: 'a@b.c', username: 'a@b.c', password: 'p',

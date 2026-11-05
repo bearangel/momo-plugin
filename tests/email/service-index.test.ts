@@ -173,6 +173,34 @@ describe('service index', () => {
     expect(r.error).toContain('超时');
   });
 
+  it('accounts.test：编辑态传密码走传入值，留空走已存值', async () => {
+    const imapPasses: unknown[] = [];
+    const smtpPasses: unknown[] = [];
+    class Spy extends FakeImapFlow {
+      constructor(o: unknown) { super(o); imapPasses.push((o as { auth?: { pass?: unknown } }).auth?.pass); }
+    }
+    const smtpLib = {
+      createTransport: (o: { auth?: { pass?: unknown } }) => {
+        smtpPasses.push(o.auth?.pass);
+        return { verify: async () => true, sendMail: async () => ({ ok: true }) };
+      },
+    };
+    const m = new Map<string, string>();
+    const secrets = {
+      async get(k: string) { return m.get(k) ?? null; },
+      async set(k: string, v: string) { m.set(k, v); },
+      async delete(k: string) { m.delete(k); },
+    };
+    const svc = buildService(makeDeps({ imapflow: Spy, nodemailerLib: smtpLib, secrets }));
+    await svc.handle('accounts.add', ACC_INPUT);
+    expect(await svc.handle('accounts.test', { email: 'a@qq.com', password: 'new-pw' })).toEqual({ ok: true });
+    expect(imapPasses[0]).toBe('new-pw');
+    expect(smtpPasses[0]).toBe('new-pw');
+    expect(await svc.handle('accounts.test', { email: 'a@qq.com', password: '' })).toEqual({ ok: true });
+    expect(imapPasses[1]).toBe('pw');
+    expect(smtpPasses[1]).toBe('pw');
+  });
+
   it('tlsMode=tls → ImapFlow secure:true（starttls → requireTLS，明文不可能构造）', async () => {
     let seen: unknown;
     class Spy extends FakeImapFlow { constructor(o: unknown) { super(o); seen = o; } }
