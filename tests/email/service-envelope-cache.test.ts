@@ -46,4 +46,10 @@ describe('envelope cache', () => {
     c.write('acc1', 'INBOX/Sub', [mk(1)]);
     expect(c.read('acc1', 'INBOX/Sub')!.items).toHaveLength(1);
   });
+
+  it('accountId 路径段穿越拒绝：write/read 均抛出（read 不得吞成 null）', () => {
+    const c = createEnvelopeCache({ dataDir: dir });
+    expect(() => c.write('../../evil', 'INBOX', [mk(1)])).toThrow('accountId');
+    expect(() => c.read('../../evil', 'INBOX')).toThrow('accountId');
+  });
 });

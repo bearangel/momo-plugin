@@ -1,15 +1,16 @@
 // 信封缓存：cache/<accountId>/<encodedFolder>.json，有界 500 条（最新 uid 在前）。
-// 非真相源——读侧任何损坏返回 null 交上层重拉 IMAP。
+// 非真相源——读侧任何损坏返回 null 交上层重拉 IMAP；账号/文件夹名非法则抛错（不吞）。
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
 
 const MAX_ITEMS = 500;
 
-function safeName(folder) {
-  const segs = String(folder || '').split('/');
-  if (String(folder).includes('\\') || segs.some((s) => s === '' || s === '.' || s === '..')) {
-    throw new Error(`folder 名非法（拒绝路径段）: ${folder}`);
+// 段消毒：folder 与 accountId 同款规则（拒绝反斜杠/空段/./..），防 RPC 侧 id 注入路径穿越。
+function safeName(label, name) {
+  const segs = String(name || '').split('/');
+  if (String(name).includes('\\') || segs.some((s) => s === '' || s === '.' || s === '..')) {
+    throw new Error(`${label} 名非法（拒绝路径段）: ${name}`);
   }
   return segs.map(encodeURIComponent).join('/');
 }
@@ -19,11 +20,13 @@ function normalizeEnvelopes(list) {
 }
 
 function createEnvelopeCache({ dataDir }) {
-  const fileOf = (accountId, folder) => path.join(dataDir, 'cache', accountId, safeName(folder) + '.json');
+  const fileOf = (accountId, folder) => path.join(dataDir, 'cache', safeName('accountId', accountId), safeName('folder', folder) + '.json');
   return {
     read(accountId, folder) {
+      // 消毒在 try 之外先行执行：非法 accountId/folder 的 throw 必须逃逸（不得被损坏兜底吞成 null）。
+      const target = fileOf(accountId, folder);
       try {
-        const parsed = JSON.parse(fs.readFileSync(fileOf(accountId, folder), 'utf-8'));
+        const parsed = JSON.parse(fs.readFileSync(target, 'utf-8'));
         if (!parsed || !Array.isArray(parsed.items)) return null;
         return parsed;
       } catch {
