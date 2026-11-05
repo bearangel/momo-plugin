@@ -8,6 +8,7 @@ const { createStore } = require('./lib/store');
 const { createEnvelopeCache } = require('./lib/envelope-cache');
 const { createMailbox } = require('./lib/mailbox');
 const { createDrafts } = require('./lib/drafts');
+const { createArchive } = require('./lib/archive');
 const { renderRawMail } = require('./lib/rfc822');
 
 function vendor(name) { return require(path.join(__dirname, '..', 'vendor', 'node_modules', name)); }
@@ -112,7 +113,8 @@ function buildService(deps) {
   // 桥超时对齐：宿主 callService 桥 requestPluginCallService 超时 10s
   // （momo-studio electron/src/main/agent/plugin-hook-bridge.ts，2026-11-05 实测 < 30s），
   // IMAP 慢操作须先于桥超时落定并给出中文错误——opTimeoutMs = 桥超时 − 2s = 8s。
-  const mailbox = createMailbox({ accountStore, cache, imapConnect, parseMail, store, opTimeoutMs: 8000 });
+  const archive = createArchive({ dataDir, store, secrets, logger });
+  const mailbox = createMailbox({ accountStore, cache, imapConnect, parseMail, store, archive, opTimeoutMs: 8000 });
   // SMTP/连通性探测超时：默认 8s（先于宿主 callService 桥 10s 落定，文案含「超时」）。
   const smtpGuard = (label, p, ms = smtpTimeoutMs) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`SMTP ${label} 超时（${ms}ms）`)), ms);
@@ -146,11 +148,15 @@ function buildService(deps) {
     'accounts.update': async (p) => {
       const r = await accountStore.update(p.id, p.patch ?? {});
       mailbox.invalidateFolders(p.id);
+      void pruneAll().catch(() => undefined);
       return r;
     },
     'accounts.delete': async (p) => {
       const r = await accountStore.remove(p.id);
       mailbox.invalidateFolders(p.id);
+      try { await archive.removeAccount(p.id); } catch (err) {
+        logger.warn('删除账号本地库失败（索引已删）', { error: err instanceof Error ? err.message : String(err) });
+      }
       return r;
     },
     'accounts.test': async (p) => {
@@ -223,13 +229,45 @@ function buildService(deps) {
     'drafts.list': () => drafts.list(),
     'drafts.send': (p) => drafts.send(p.draftId),
     'drafts.discard': (p) => drafts.discard(p.draftId),
+    'archive.getSettings': () => archive.stats(),
+    'archive.setRoot': (p) => archive.setRoot(String(p.path || '')),
+    'archive.clear': () => archive.clearCurrent(),
   };
 
+  // 保留清理（spec §9）：Sent/forever 由 mailbox.retentionCutoff 返回 null 豁免。
+  async function pruneAccount(accountId) {
+    const folders = new Set(store.listArchiveRows(accountId).map((r) => r.folder));
+    for (const folder of folders) {
+      const cutoff = await mailbox.retentionCutoff(accountId, folder);
+      if (cutoff != null) await archive.prune(accountId, cutoff);
+    }
+  }
+  async function pruneAll() {
+    for (const acc of await accountStore.list()) {
+      await pruneAccount(acc.id).catch(() => undefined);
+    }
+  }
+  let pruneTimer = null;
+  let storeClosed = false;
+
   return {
-    async start() { await drafts.sweep(); logger.info?.('email service started'); },
+    async start() {
+      await drafts.sweep();
+      try {
+        const ids = (await accountStore.list()).map((a) => a.id);
+        const v = await archive.verifyStartup(ids);
+        if (v.fixedMissing || v.removedOrphans) logger.info?.('归档启动核对', v);
+        await pruneAll();
+      } catch (err) {
+        logger.warn('归档初始化失败（降级为在线读信）', { error: err instanceof Error ? err.message : String(err) });
+      }
+      pruneTimer = setInterval(() => { void pruneAll().catch(() => undefined); }, 10 * 60 * 1000);
+      logger.info?.('email service started');
+    },
     async stop() {
+      if (pruneTimer) { clearInterval(pruneTimer); pruneTimer = null; }
       await mailbox.closeAll();
-      store.close();
+      if (!storeClosed) { store.close(); storeClosed = true; }
     },
     async handle(method, params) {
       const fn = ROUTES[method];

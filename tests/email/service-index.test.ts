@@ -282,3 +282,78 @@ describe('service index', () => {
     expect((await svc.handle('drafts.list', {}))[0].accountId).toBe(firstId);
   });
 });
+
+describe('archive 路由与生命周期（2026-11-05 归档 spec §7/§9/§10.1）', () => {
+  const ACC_INPUT = {
+    email: 'me@qq.com', displayName: null, username: 'me@qq.com', password: 'pw', retention: 'forever',
+    imap: { host: 'imap.qq.com', port: 993, tlsMode: 'tls' },
+    smtp: { host: 'smtp.qq.com', port: 465, tlsMode: 'tls' },
+  };
+
+  it('setRoot/getSettings/clear 路由', async () => {
+    const svc = buildService(makeDeps());
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-svc-'));
+    const r = await svc.handle('archive.setRoot', { path: root });
+    expect(r.rootPath).toBe(fs.realpathSync(root));
+    const st = await svc.handle('archive.getSettings', {});
+    expect(st.enabled).toBe(true);
+    expect(st.rootPath).toBe(fs.realpathSync(root));
+    expect(st.files).toBe(0);
+    const c = await svc.handle('archive.clear', {});
+    expect(c.removed).toBe(0);
+    await svc.stop();
+  });
+
+  it('setRoot 相对路径 → 中文错误', async () => {
+    const svc = buildService(makeDeps());
+    await expect(svc.handle('archive.setRoot', { path: 'rel/x' })).rejects.toThrow(/绝对路径/);
+    await svc.stop();
+  });
+
+  it('读信落盘 → 删除账号级联清理（文件 + 索引）', async () => {
+    const svc = buildService(makeDeps());
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-svc-'));
+    await svc.handle('archive.setRoot', { path: root });
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 });
+    await new Promise((r2) => setTimeout(r2, 60));
+    const mid = await svc.handle('archive.getSettings', {});
+    expect(mid.files).toBe(1);
+    const accDir = fs.readdirSync(root).filter((n) => n.startsWith('acc_'));
+    expect(accDir).toHaveLength(1);
+    await svc.handle('accounts.delete', { id: acc.id });
+    const after = await svc.handle('archive.getSettings', {});
+    expect(after.files).toBe(0);
+    expect(fs.existsSync(path.join(root, accDir[0]!))).toBe(false);
+    fs.rmSync(root, { recursive: true, force: true });
+    await svc.stop();
+  });
+
+  it('retention 收紧（accounts.update）→ 过期归档被清理', async () => {
+    class OldMail extends FakeImapFlow {
+      override async *fetch() {
+        if (!this.selectedFolder) throw new Error('No mailbox selected');
+        yield { uid: 1, envelope: { subject: 'old', from: [{ address: 'a@b.c' }], to: [{ address: 'm@n.o' }], date: new Date('2026-09-01T00:00:00Z') }, flags: new Set(), bodyStructure: {}, size: 100 };
+      }
+    }
+    const svc = buildService(makeDeps({ imapflow: OldMail }));
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-svc-'));
+    await svc.handle('archive.setRoot', { path: root });
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 });
+    await new Promise((r2) => setTimeout(r2, 60));
+    expect((await svc.handle('archive.getSettings', {})).files).toBe(1);
+    await svc.handle('accounts.update', { id: acc.id, patch: { retention: '1m' } });
+    await new Promise((r2) => setTimeout(r2, 120));
+    expect((await svc.handle('archive.getSettings', {})).files).toBe(0);
+    fs.rmSync(root, { recursive: true, force: true });
+    await svc.stop();
+  });
+
+  it('start/stop 幂等（无 root 时安全空转）', async () => {
+    const svc = buildService(makeDeps());
+    await svc.start();
+    await svc.stop();
+    await svc.stop();
+  });
+});
