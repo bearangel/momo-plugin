@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 const MAX_ITEMS = 500;
 
 const SCHEMA_V1 = `
@@ -40,6 +40,17 @@ CREATE TABLE IF NOT EXISTS folder_cache (
 );
 `;
 
+const SCHEMA_V3 = `
+CREATE TABLE IF NOT EXISTS local_archive (
+  account_id TEXT NOT NULL, folder TEXT NOT NULL, uid INTEGER NOT NULL,
+  root_id TEXT NOT NULL, rel_path TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+  sha256 TEXT NOT NULL, enc_version INTEGER NOT NULL, msg_date INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL, cached_at INTEGER NOT NULL,
+  PRIMARY KEY (account_id, folder, uid)
+);
+CREATE INDEX IF NOT EXISTS idx_local_archive_root ON local_archive(root_id);
+`;
+
 function dateMsOf(envelope) {
   const t = Date.parse(envelope && envelope.date);
   return Number.isFinite(t) ? t : 0;
@@ -64,6 +75,14 @@ function rowToDraft(row) {
     expireReason: row.expire_reason ?? null,
     archiveWarning: row.archive_warning ?? null,
     deleteWarning: row.delete_warning ?? null,
+  };
+}
+
+function rowToArchive(r) {
+  return {
+    accountId: r.account_id, folder: r.folder, uid: Number(r.uid), rootId: r.root_id,
+    relPath: r.rel_path, sizeBytes: Number(r.size_bytes), sha256: r.sha256,
+    encVersion: Number(r.enc_version), msgDate: Number(r.msg_date), state: r.state, cachedAt: Number(r.cached_at),
   };
 }
 
@@ -100,6 +119,17 @@ function createStore({ dataDir }) {
       try {
         db.exec(SCHEMA_V2);
         db.exec('PRAGMA user_version=2');
+        db.exec('COMMIT');
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    }
+    if (version < 3) {
+      db.exec('BEGIN');
+      try {
+        db.exec(SCHEMA_V3);
+        db.exec('PRAGMA user_version=3');
         db.exec('COMMIT');
       } catch (err) {
         db.exec('ROLLBACK');
@@ -221,6 +251,56 @@ function createStore({ dataDir }) {
         db.exec('ROLLBACK');
         throw err;
       }
+    },
+    getArchiveRow(accountId, folder, uid) {
+      const r = db.prepare('SELECT * FROM local_archive WHERE account_id = ? AND folder = ? AND uid = ?')
+        .get(accountId, folder, uid);
+      return r ? rowToArchive(r) : null;
+    },
+    upsertArchiveRow(row) {
+      db.prepare(`INSERT INTO local_archive (account_id, folder, uid, root_id, rel_path, size_bytes, sha256, enc_version, msg_date, state, cached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, folder, uid) DO UPDATE SET root_id=excluded.root_id, rel_path=excluded.rel_path,
+          size_bytes=excluded.size_bytes, sha256=excluded.sha256, enc_version=excluded.enc_version,
+          msg_date=excluded.msg_date, state=excluded.state, cached_at=excluded.cached_at`)
+        .run(row.accountId, row.folder, Number(row.uid) || 0, row.rootId, row.relPath,
+          Number(row.sizeBytes) || 0, row.sha256, Number(row.encVersion) || 1,
+          Number(row.msgDate) || 0, row.state, Number(row.cachedAt) || Date.now());
+    },
+    setArchiveState(accountId, folder, uid, state) {
+      db.prepare('UPDATE local_archive SET state = ? WHERE account_id = ? AND folder = ? AND uid = ?')
+        .run(state, accountId, folder, uid);
+    },
+    deleteArchiveRows(accountId, opts = {}) {
+      let sql = 'DELETE FROM local_archive WHERE account_id = ?';
+      const args = [accountId];
+      if (opts.folder) { sql += ' AND folder = ?'; args.push(opts.folder); }
+      if (opts.uid !== undefined) { sql += ' AND uid = ?'; args.push(opts.uid); }
+      if (opts.rootId) { sql += ' AND root_id = ?'; args.push(opts.rootId); }
+      return Number(db.prepare(sql).run(...args).changes);
+    },
+    listArchiveRows(accountId, opts = {}) {
+      let sql = 'SELECT * FROM local_archive WHERE account_id = ?';
+      const args = [accountId];
+      if (opts.state) { sql += ' AND state = ?'; args.push(opts.state); }
+      return db.prepare(sql).all(...args).map(rowToArchive);
+    },
+    archiveAccountsOfRoot(rootId) {
+      return db.prepare('SELECT DISTINCT account_id AS id FROM local_archive WHERE root_id = ?').all(rootId)
+        .map((r) => String(r.id));
+    },
+    archiveStats(rootId) {
+      const r = db.prepare(`SELECT
+        SUM(CASE WHEN state='ok' THEN 1 ELSE 0 END) AS files,
+        SUM(CASE WHEN state='ok' THEN size_bytes ELSE 0 END) AS bytes,
+        SUM(CASE WHEN state='missing' THEN 1 ELSE 0 END) AS missing,
+        SUM(CASE WHEN state='corrupt' THEN 1 ELSE 0 END) AS corrupt,
+        SUM(CASE WHEN state='too_large' THEN 1 ELSE 0 END) AS tooLarge
+        FROM local_archive WHERE root_id = ?`).get(rootId) ?? {};
+      return {
+        files: Number(r.files) || 0, bytes: Number(r.bytes) || 0, missing: Number(r.missing) || 0,
+        corrupt: Number(r.corrupt) || 0, tooLarge: Number(r.tooLarge) || 0,
+      };
     },
     close() { db.close(); },
   };

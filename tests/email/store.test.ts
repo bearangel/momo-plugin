@@ -133,3 +133,53 @@ describe('store', () => {
     store.close();
   });
 });
+
+describe('local_archive（schema v3）', () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    accountId: 'a', folder: 'INBOX', uid: 7, rootId: 'r1',
+    relPath: 'a/INBOX/2026-11/7-abc12345.eml.enc', sizeBytes: 100, sha256: 'h',
+    encVersion: 1, msgDate: 1790000000000, state: 'ok', cachedAt: 1790000000000, ...over,
+  });
+
+  it('v2 存量库 → 打开即迁移到 v3（local_archive 可用）', () => {
+    const s1 = createStore({ dataDir: dir });
+    s1.close();
+    const db = new DatabaseSync(path.join(dir, 'data.db'));
+    db.exec('PRAGMA user_version=2');
+    db.close();
+    const s2 = createStore({ dataDir: dir });
+    expect(s2.getArchiveRow('a', 'INBOX', 1)).toBeNull();
+    s2.close();
+    const db2 = new DatabaseSync(path.join(dir, 'data.db'));
+    expect(db2.prepare('PRAGMA user_version').get()!.user_version).toBe(3);
+    db2.close();
+  });
+
+  it('upsert 幂等覆盖 / 状态流转 / uid 过滤删除 / 统计', () => {
+    const s = createStore({ dataDir: dir });
+    s.upsertArchiveRow(row());
+    expect(s.getArchiveRow('a', 'INBOX', 7)!.relPath).toBe('a/INBOX/2026-11/7-abc12345.eml.enc');
+    s.upsertArchiveRow(row({ sizeBytes: 200 }));
+    expect(s.getArchiveRow('a', 'INBOX', 7)!.sizeBytes).toBe(200);
+    s.setArchiveState('a', 'INBOX', 7, 'missing');
+    expect(s.getArchiveRow('a', 'INBOX', 7)!.state).toBe('missing');
+    s.upsertArchiveRow(row({ uid: 8, state: 'corrupt', sizeBytes: 1 }));
+    s.upsertArchiveRow(row({ uid: 9, state: 'too_large', sizeBytes: 0 }));
+    expect(s.archiveStats('r1')).toEqual({ files: 3, bytes: 201, missing: 1, corrupt: 1, tooLarge: 1 });
+    expect(s.deleteArchiveRows('a', { folder: 'INBOX', uid: 8 })).toBe(1);
+    expect(s.getArchiveRow('a', 'INBOX', 8)).toBeNull();
+    expect(s.listArchiveRows('a', { state: 'ok' })).toHaveLength(2);
+    expect(s.deleteArchiveRows('a', { folder: 'INBOX' })).toBe(2);
+    expect(s.getArchiveRow('a', 'INBOX', 7)).toBeNull();
+    s.close();
+  });
+
+  it('archiveAccountsOfRoot 按 rootId 聚合账号集合', () => {
+    const s = createStore({ dataDir: dir });
+    s.upsertArchiveRow(row());
+    s.upsertArchiveRow(row({ accountId: 'b', uid: 1 }));
+    s.upsertArchiveRow(row({ accountId: 'c', rootId: 'r-old', uid: 2 }));
+    expect(s.archiveAccountsOfRoot('r1').sort()).toEqual(['a', 'b']);
+    s.close();
+  });
+});
