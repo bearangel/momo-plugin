@@ -197,15 +197,23 @@ describe.skipIf(!HOST_READY)('email dev 装载全链路', () => {
       };
     };
     const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-smoke-'));
+    // 冒烟环境不落真实 HOME 下的默认归档目录（~/.momo-plugin/email）
+    const prevKill = process.env.MOMO_EMAIL_ARCHIVE_DISABLE_DEFAULT;
+    process.env.MOMO_EMAIL_ARCHIVE_DISABLE_DEFAULT = '1';
     const svc = mod.createService({
       getDataDir: () => dataDir,
+      getConfig: () => ({}),
       secrets: { get: async () => null, set: async () => {}, delete: async () => {} },
       logger: { info() {}, warn() {}, error() {} },
     });
     try {
       await svc.start();
       await expect(svc.handle('nope', {})).rejects.toThrow('未知方法');
+      const cfg = (await svc.handle('config.get', {})) as { showRemoteImages: boolean; archiveRoot: string };
+      expect(cfg).toEqual({ showRemoteImages: false, archiveRoot: '' });
     } finally {
+      if (prevKill === undefined) delete process.env.MOMO_EMAIL_ARCHIVE_DISABLE_DEFAULT;
+      else process.env.MOMO_EMAIL_ARCHIVE_DISABLE_DEFAULT = prevKill;
       await svc.stop();
       fs.rmSync(dataDir, { recursive: true, force: true });
     }

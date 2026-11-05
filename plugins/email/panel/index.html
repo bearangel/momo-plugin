@@ -123,11 +123,10 @@
       <label>存储目录</label>
       <input id="st-path" readonly placeholder="未启用（仅在线读信）">
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button onclick="chooseStorageDir()">选择目录…</button>
         <button onclick="clearArchive()">清空本地库…</button>
         <button class="pri" onclick="document.getElementById('storage-form').style.display='none'">关闭</button>
       </div>
-      <div class="hint" id="st-note">正文与附件加密存储于所选目录；数据库仅存路径索引。主密钥保存在系统钥匙串，主密钥丢失后本地邮件不可恢复。</div>
+      <div class="hint" id="st-note">存储目录在 设置 → 插件 → 邮件 中配置（留空使用默认目录）。正文与附件加密存储；数据库仅存路径索引；主密钥保存在系统钥匙串，主密钥丢失后本地邮件不可恢复。</div>
       <div class="status" id="st-stats"></div>
     </div>
   </div>
@@ -464,15 +463,6 @@
         : '';
     }).catch(function (e) { $('st-stats').className = 'status err'; $('st-stats').textContent = '读取失败：' + e.message; });
   }
-  function chooseStorageDir() {
-    $('st-stats').className = 'status';
-    $('st-stats').textContent = '请在系统对话框中选择目录…';
-    send('app:pickDirectory', { opts: { title: '选择邮件存储目录' } }).then(function (p) {
-      if (!p) { $('st-stats').textContent = ''; return; }
-      call('archive.setRoot', { path: p }).then(function () { toast('存储目录已更新'); openStorage(); })
-        .catch(function (e) { $('st-stats').className = 'status err'; $('st-stats').textContent = e.message; });
-    }).catch(function (e) { $('st-stats').className = 'status err'; $('st-stats').textContent = e.message; });
-  }
   function clearArchive() {
     inlineConfirm('清空本地邮件库？仅删除当前目录的加密文件与索引，不影响服务器邮件。').then(function (ok) {
       if (!ok) return;
@@ -639,6 +629,7 @@
   function turnPage(d) { S.page = Math.max(1, S.page + d); reloadList(); }
 
   function boot() {
+    call('config.get', {}).then(function (cfg) { S.showRemoteImages = !!(cfg && cfg.showRemoteImages); }).catch(function () {});
     call('accounts.list').then(function (accs) {
       S.accounts = accs || [];
       if (!S.accId && S.accounts.length) { pickAccount(S.accounts[0].id); } else { renderAccounts(); }

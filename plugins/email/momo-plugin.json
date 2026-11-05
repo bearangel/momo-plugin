@@ -9,5 +9,18 @@
     "skills": "./skills",
     "agents": "./agents",
     "panel": "./panel"
+  },
+  "config": {
+    "type": "object",
+    "properties": {
+      "archiveRoot": {
+        "type": "path",
+        "title": "本地邮件存储目录"
+      },
+      "showRemoteImages": {
+        "type": "boolean",
+        "title": "邮件中直接显示远程图片"
+      }
+    }
   }
 }

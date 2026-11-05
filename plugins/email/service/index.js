@@ -9,6 +9,7 @@ const { createEnvelopeCache } = require('./lib/envelope-cache');
 const { createMailbox } = require('./lib/mailbox');
 const { createDrafts } = require('./lib/drafts');
 const { createArchive } = require('./lib/archive');
+const os = require('node:os');
 const { renderRawMail } = require('./lib/rfc822');
 
 function vendor(name) { return require(path.join(__dirname, '..', 'vendor', 'node_modules', name)); }
@@ -101,8 +102,18 @@ function imapAdapterFor(ImapFlow) {
 // 认证类失败识别：命中则标记账号健康态（spec §10），下次列表即显红点。
 const AUTH_FAIL_RE = /AUTHENTICATIONFAILED|LOGIN failed|authenticate|Invalid credentials|535/i;
 
+// 归档根目录解析：显式配置优先；空配置 → 默认 ~/.momo-plugin/email（首启自动创建）；
+// disableDefault（测试/特殊环境 kill-switch）→ null（不启用归档）。
+function effectiveArchiveRoot(config, { homeDir, disableDefault = false } = {}) {
+  const cfgRoot = String((config && config.archiveRoot) || '').trim();
+  if (cfgRoot) return cfgRoot;
+  if (disableDefault) return null;
+  return path.join(homeDir, '.momo-plugin', 'email');
+}
+
 function buildService(deps) {
   const { dataDir, secrets, logger } = deps;
+  const getConfig = deps.config ?? (() => ({}));
   const smtpTimeoutMs = deps.smtpTimeoutMs ?? 8000;
   fs.mkdirSync(dataDir, { recursive: true });
   const accountStore = createAccountStore({ dataDir, secrets });
@@ -232,6 +243,10 @@ function buildService(deps) {
     'archive.getSettings': () => archive.stats(),
     'archive.setRoot': (p) => archive.setRoot(String(p.path || '')),
     'archive.clear': () => archive.clearCurrent(),
+    'config.get': () => {
+      const cfg = getConfig() ?? {};
+      return { showRemoteImages: cfg.showRemoteImages === true, archiveRoot: String(cfg.archiveRoot ?? '') };
+    },
   };
 
   // 保留清理（spec §9）：Sent/forever 由 mailbox.retentionCutoff 返回 null 豁免。
@@ -250,8 +265,24 @@ function buildService(deps) {
   let pruneTimer = null;
   let storeClosed = false;
 
+  // archiveRoot 对账（配置面在 设置→插件；service 重启即生效）：路径与当前不同 → setRoot
+  //（换 rootId，旧库保留）；目录不可用 → warn 降级在线读信，不阻断服务。
+  async function reconcileArchiveRoot() {
+    const target = deps.archiveRoot;
+    if (!target) return;
+    try {
+      if (deps.archiveRootCreate) fs.mkdirSync(target, { recursive: true });
+      const rp = fs.realpathSync(target);
+      const cur = await archive.stats();
+      if (cur.rootPath !== rp) await archive.setRoot(rp);
+    } catch (err) {
+      logger.warn('归档目录不可用（降级为在线读信）', { target, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   return {
     async start() {
+      await reconcileArchiveRoot();
       await drafts.sweep();
       try {
         const ids = (await accountStore.list()).map((a) => a.id);
@@ -294,4 +325,5 @@ module.exports.createService = function createService(ctx) {
   };
 };
 module.exports.buildService = buildService;
+module.exports.effectiveArchiveRoot = effectiveArchiveRoot;
 module.exports.shouldResetNamespace = shouldResetNamespace;

@@ -360,3 +360,63 @@ describe('archive 路由与生命周期（2026-11-05 归档 spec §7/§9/§10.1�
     await svc.stop();
   });
 });
+
+describe('archiveRoot 配置对账 + config.get（2026-11-05 配置迁移）', () => {
+  it('deps.archiveRoot 指向新目录 → start 自动 setRoot；重复 start 不换 rootId', async () => {
+    const rootA = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-cfg-a-'));
+    const deps = makeDeps();
+    const svc = buildService({ ...deps, archiveRoot: rootA });
+    await svc.start();
+    const s1 = await svc.handle('archive.getSettings', {});
+    expect(s1.enabled).toBe(true);
+    expect(s1.rootPath).toBe(fs.realpathSync(rootA));
+    await svc.stop();
+    const svc2 = buildService({ ...deps, archiveRoot: rootA });
+    await svc2.start();
+    const s2 = await svc2.handle('archive.getSettings', {});
+    expect(s2.rootId).toBe(s1.rootId);
+    await svc2.stop();
+    fs.rmSync(rootA, { recursive: true, force: true });
+  });
+
+  it('archiveRoot 不存在且不允许创建 → warn 降级（服务正常、归档未启用）', async () => {
+    const warns: string[] = [];
+    const svc = buildService(makeDeps({ logger: { info() {}, warn: (m: string) => warns.push(m), error() {} } }));
+    const svc2 = buildService({
+      ...makeDeps({ logger: { info() {}, warn: (m: string) => warns.push(m), error() {} } }),
+      archiveRoot: path.join(os.tmpdir(), `nope-${Date.now()}`),
+    });
+    void svc;
+    await svc2.start();
+    expect(warns.join('\n')).toMatch(/归档|目录/);
+    const st = await svc2.handle('archive.getSettings', {});
+    expect(st.enabled).toBe(false);
+    await svc2.stop();
+  });
+
+  it('archiveRootCreate=true（默认目录语义）→ 不存在则自动创建并启用', async () => {
+    const root = path.join(os.tmpdir(), `arc-default-${Date.now()}`);
+    const svc = buildService({ ...makeDeps(), archiveRoot: root, archiveRootCreate: true });
+    await svc.start();
+    const st = await svc.handle('archive.getSettings', {});
+    expect(st.enabled).toBe(true);
+    expect(st.rootPath).toBe(fs.realpathSync(root));
+    await svc.stop();
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+
+  it('config.get 路由：showRemoteImages 布尔 + archiveRoot 透传', async () => {
+    const svc = buildService({ ...makeDeps(), config: () => ({ showRemoteImages: true, archiveRoot: '/tmp/x' }) });
+    const cfg = await svc.handle('config.get', {});
+    expect(cfg).toEqual({ showRemoteImages: true, archiveRoot: '/tmp/x' });
+    await svc.stop();
+  });
+
+  it('effectiveArchiveRoot：空配置 → ~/.momo-plugin/email；禁用开关 → null；显式配置优先', async () => {
+    const { effectiveArchiveRoot } = await import('../../plugins/email/service/index');
+    const home = '/home/tester';
+    expect(effectiveArchiveRoot({}, { homeDir: home })).toBe('/home/tester/.momo-plugin/email');
+    expect(effectiveArchiveRoot({ archiveRoot: '/data/mail' }, { homeDir: home })).toBe('/data/mail');
+    expect(effectiveArchiveRoot({}, { homeDir: home, disableDefault: true })).toBeNull();
+  });
+});
