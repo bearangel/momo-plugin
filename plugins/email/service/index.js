@@ -239,7 +239,7 @@ function buildService(deps) {
     const folders = new Set(store.listArchiveRows(accountId).map((r) => r.folder));
     for (const folder of folders) {
       const cutoff = await mailbox.retentionCutoff(accountId, folder);
-      if (cutoff != null) await archive.prune(accountId, cutoff);
+      if (cutoff != null) await archive.prune(accountId, folder, cutoff);
     }
   }
   async function pruneAll() {

@@ -341,11 +341,14 @@ describe('archive 路由与生命周期（2026-11-05 归档 spec §7/§9/§10.1�
     await svc.handle('archive.setRoot', { path: root });
     const acc = await svc.handle('accounts.add', ACC_INPUT);
     await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 });
+    await svc.handle('mails.get', { accountId: acc.id, folder: 'Sent', uid: 1 });
     await new Promise((r2) => setTimeout(r2, 60));
-    expect((await svc.handle('archive.getSettings', {})).files).toBe(1);
+    expect((await svc.handle('archive.getSettings', {})).files).toBe(2);
     await svc.handle('accounts.update', { id: acc.id, patch: { retention: '1m' } });
-    await new Promise((r2) => setTimeout(r2, 120));
-    expect((await svc.handle('archive.getSettings', {})).files).toBe(0);
+    await new Promise((r2) => setTimeout(r2, 150));
+    const after = await svc.handle('archive.getSettings', {});
+    expect(after.files).toBe(1);
+    expect(after.corrupt + after.missing).toBe(0);
     fs.rmSync(root, { recursive: true, force: true });
     await svc.stop();
   });

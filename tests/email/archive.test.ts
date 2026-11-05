@@ -121,7 +121,7 @@ describe('archive', () => {
     await arc.write('acc1', 'INBOX', 1, Buffer.from('old'), old);
     await arc.write('acc1', 'INBOX', 2, Buffer.from('new'), Date.now());
     await arc.write('acc1', 'INBOX', 3, Buffer.from('unk'), 0);
-    const r = await arc.prune('acc1', Date.now() - 30 * 86400000);
+    const r = await arc.prune('acc1', 'INBOX', Date.now() - 30 * 86400000);
     expect(r.removed).toBe(1);
     expect(await arc.read('acc1', 'INBOX', 1)).toBeNull();
     expect(await arc.read('acc1', 'INBOX', 2)).not.toBeNull();
@@ -169,5 +169,20 @@ describe('archive', () => {
     expect(s.rootPath).toBe(fs.realpathSync(root));
     expect(s.files).toBe(1);
     expect(s.bytes).toBeGreaterThan(0);
+  });
+});
+
+describe('prune 按 folder 限定（发件箱永久，spec §1.1/§9）', () => {
+  it('同账号两文件夹均过期：只清指定 folder，另一 folder 行与文件保留', async () => {
+    const arc = mk();
+    await arc.setRoot(root);
+    const old = Date.now() - 40 * 86400000;
+    await arc.write('acc1', 'INBOX', 1, Buffer.from('a'), old);
+    await arc.write('acc1', 'Sent Messages', 1, Buffer.from('s'), old);
+    const cutoff = Date.now() - 30 * 86400000;
+    const r = await arc.prune('acc1', 'INBOX', cutoff);
+    expect(r.removed).toBe(1);
+    expect(await arc.read('acc1', 'INBOX', 1)).toBeNull();
+    expect(await arc.read('acc1', 'Sent Messages', 1)).not.toBeNull();
   });
 });

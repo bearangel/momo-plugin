@@ -283,6 +283,7 @@ function createStore({ dataDir }) {
       let sql = 'SELECT * FROM local_archive WHERE account_id = ?';
       const args = [accountId];
       if (opts.state) { sql += ' AND state = ?'; args.push(opts.state); }
+      if (opts.folder) { sql += ' AND folder = ?'; args.push(opts.folder); }
       return db.prepare(sql).all(...args).map(rowToArchive);
     },
     archiveAccountsOfRoot(rootId) {

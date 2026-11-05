@@ -140,11 +140,13 @@ function createArchive({ dataDir, store, secrets, logger, now = () => new Date()
     }
   }
 
-  async function prune(accountId, cutoffMs) {
+  // folder 限定：Sent 等豁免文件夹由调用方（service.pruneAccount）不传 cutoff 表达；
+  // 本函数只清理指定 folder 内过期行——同账号其它文件夹不受牵连（spec §1.1 发件箱永久）。
+  async function prune(accountId, folder, cutoffMs) {
     if (cutoffMs == null) return { removed: 0 };
     const cfg = archiveCfg();
     let removed = 0;
-    for (const row of store.listArchiveRows(accountId, { state: 'ok' })) {
+    for (const row of store.listArchiveRows(accountId, { state: 'ok', folder })) {
       if (row.rootId !== cfg.rootId || row.msgDate <= 0 || row.msgDate >= cutoffMs) continue;
       try { fs.unlinkSync(absOf(row.relPath)); } catch { /* 文件已不在 */ }
       store.deleteArchiveRows(accountId, { folder: row.folder, uid: row.uid });
