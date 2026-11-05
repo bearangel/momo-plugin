@@ -86,3 +86,16 @@ describe.skipIf(!HOST_READY)('email panel', () => {
     expect(html).toContain('img-src data: cid:');
   });
 });
+
+describe('面板存储设置区（2026-11-05 归档 spec §10）', () => {
+  it('存储入口/弹层/选目录桥/清空/风险提示齐备', () => {
+    const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
+    expect(html).toContain('存储…');
+    expect(html).toContain('id="st-path"');
+    expect(html).toContain("send('app:pickDirectory'");
+    expect(html).toContain('archive.getSettings');
+    expect(html).toContain('archive.setRoot');
+    expect(html).toContain('archive.clear');
+    expect(html).toContain('主密钥丢失');
+  });
+});
