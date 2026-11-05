@@ -6,10 +6,16 @@ import path from 'node:path';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { createMailbox, findFolders, CACHE_TTL_MS } from '../../plugins/email/service/lib/mailbox';
 import { createEnvelopeCache } from '../../plugins/email/service/lib/envelope-cache';
+import { createStore } from '../../plugins/email/service/lib/store';
 
 let dir: string;
-beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-mbox-')); });
-afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+let stores: Array<{ close(): void }> = [];
+let lastCache: ReturnType<typeof createEnvelopeCache>;
+beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-mbox-')); stores = []; });
+afterEach(() => {
+  for (const st of stores) { try { st.close(); } catch { /* 已关闭 */ } }
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 const ACC = { id: 'acc1', email: 'me@qq.com', imap: { host: 'imap.qq.com', port: 993, tlsMode: 'tls' } };
 
@@ -41,9 +47,13 @@ function makeImap(script: Record<string, unknown> = {}) {
 }
 
 function makeMailbox(conn: ReturnType<typeof makeImap>, over: Record<string, unknown> = {}) {
-  const cache = createEnvelopeCache({ dataDir: dir });
+  const store = createStore({ dataDir: dir });
+  stores.push(store);
+  const cache = createEnvelopeCache({ store });
+  lastCache = cache;
+  const account = (over.account as typeof ACC | undefined) ?? ACC;
   const accountStore = {
-    async get(id: string) { return id === 'acc1' ? ACC : null; },
+    async get(id: string) { return id === 'acc1' ? account : null; },
     async getPassword() { return 'pw'; },
   };
   return createMailbox({
@@ -179,6 +189,48 @@ describe('mailbox', () => {
   it('sentFolder：识别不到返回 null（不回退 INBOX）', async () => {
     const conn = makeImap({ list: [{ path: 'INBOX', specialUse: '\\Inbox' }] });
     await expect(makeMailbox(conn).sentFolder('acc1')).resolves.toBeNull();
+  });
+
+  it('retention=1m：旧信封不返回且不落库（本地缓存，不动服务器）', async () => {
+    const now = new Date().toISOString();
+    const conn = makeImap({ envelopes: [
+      { uid: 1, subject: 'old', from: 'a', to: 'b', date: '2020-01-01T00:00:00Z', seen: false, hasAttachments: false, size: 100 },
+      { uid: 2, subject: 'new', from: 'a', to: 'b', date: now, seen: false, hasAttachments: false, size: 100 },
+    ] });
+    const mb = makeMailbox(conn, { account: { ...ACC, retention: '1m' } });
+    const page = await mb.envelopes('acc1', 'INBOX', { force: true });
+    expect(page.items.map((e) => e.uid)).toEqual([2]);
+    expect(lastCache.read('acc1', 'INBOX')!.items.map((e) => e.uid)).toEqual([2]);
+  });
+
+  it('retention=1m + sent 文件夹 → 全保留（Sent 永久）', async () => {
+    const conn = makeImap({ envelopes: [
+      { uid: 1, subject: 'old', from: 'a', to: 'b', date: '2020-01-01T00:00:00Z', seen: false, hasAttachments: false, size: 100 },
+      { uid: 2, subject: 'new', from: 'a', to: 'b', date: new Date().toISOString(), seen: false, hasAttachments: false, size: 100 },
+    ] });
+    const mb = makeMailbox(conn, { account: { ...ACC, retention: '1m' } });
+    const page = await mb.envelopes('acc1', '已发送', { force: true });
+    expect(page.items.map((e) => e.uid)).toEqual([2, 1]);
+  });
+
+  it('retention=1m 但 sent 探测失败 → 不清理（fail-safe）', async () => {
+    const conn = makeImap({ envelopes: [
+      { uid: 1, subject: 'old', from: 'a', to: 'b', date: '2020-01-01T00:00:00Z', seen: false, hasAttachments: false, size: 100 },
+      { uid: 2, subject: 'new', from: 'a', to: 'b', date: new Date().toISOString(), seen: false, hasAttachments: false, size: 100 },
+    ] });
+    (conn as unknown as { list: unknown }).list = async () => { throw new Error('list boom'); };
+    const mb = makeMailbox(conn, { account: { ...ACC, retention: '1m' } });
+    const page = await mb.envelopes('acc1', 'INBOX', { force: true });
+    expect(page.items.map((e) => e.uid)).toEqual([2, 1]);
+  });
+
+  it('retention=forever（缺省）→ 不清理', async () => {
+    const conn = makeImap({ envelopes: [
+      { uid: 1, subject: 'old', from: 'a', to: 'b', date: '2020-01-01T00:00:00Z', seen: false, hasAttachments: false, size: 100 },
+      { uid: 2, subject: 'new', from: 'a', to: 'b', date: new Date().toISOString(), seen: false, hasAttachments: false, size: 100 },
+    ] });
+    const page = await makeMailbox(conn).envelopes('acc1', 'INBOX', { force: true });
+    expect(page.items.map((e) => e.uid)).toEqual([2, 1]);
   });
 
   it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新；uid 降序分页', async () => {

@@ -87,6 +87,25 @@ describe('accounts store', () => {
     expect(await store.list()).toEqual([]);
   });
 
+  it('retention：缺省 forever；非法值拒绝', async () => {
+    const store = createAccountStore({ dataDir: dir, secrets: makeSecrets() });
+    const a = await store.add({ email: 'a@b.c', username: 'a@b.c', password: 'p',
+      imap: PRESETS.qq.imap, smtp: PRESETS.qq.smtp });
+    expect(a.retention).toBe('forever');
+    expect((await store.list())[0]!.retention).toBe('forever');
+    await expect(store.add({ email: 'b@b.c', username: 'b@b.c', password: 'p', retention: '2m',
+      imap: PRESETS.qq.imap, smtp: PRESETS.qq.smtp })).rejects.toThrow('retention');
+  });
+
+  it('retention：update 可修改且 list 投影带出', async () => {
+    const store = createAccountStore({ dataDir: dir, secrets: makeSecrets() });
+    const a = await store.add({ email: 'a@b.c', username: 'a@b.c', password: 'p',
+      imap: PRESETS.qq.imap, smtp: PRESETS.qq.smtp });
+    await store.update(a.id, { retention: '6m' });
+    expect((await store.list())[0]!.retention).toBe('6m');
+    await expect(store.update(a.id, { retention: 'bad' })).rejects.toThrow('retention');
+  });
+
   it('markHealth 落账号健康态', async () => {
     const store = createAccountStore({ dataDir: dir, secrets: makeSecrets() });
     const a = await store.add({ email: 'a@b.c', username: 'a@b.c', password: 'p',

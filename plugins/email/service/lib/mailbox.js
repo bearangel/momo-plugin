@@ -11,6 +11,21 @@ const ATTACH_MAX = 10 * 1024 * 1024;        // 附件 RPC 上限
 const IDLE_MS = 10 * 60 * 1000;             // 连接空闲回收
 const READ_CACHE_MAX = 50;                  // 正文内存 LRU 容量
 const FOLDERS_TTL_MS = 60 * 1000;           // 文件夹树缓存（切账号体感）
+// 本地缓存保留时长（月=30天、半年=182天、年=365天，均为近似）。仅清理本地缓存，绝不动服务器。
+const RETENTION_DAYS = { '1m': 30, '6m': 182, '1y': 365 };
+
+function envelopeDateMs(e) {
+  const t = Date.parse(e && e.date);
+  return Number.isFinite(t) ? t : 0; // 0 = 日期未知 → 永不按龄清理
+}
+
+function filterByAge(list, cutoffMs) {
+  if (cutoffMs == null) return list;
+  return list.filter((e) => {
+    const t = envelopeDateMs(e);
+    return t === 0 || t >= cutoffMs;
+  });
+}
 
 // 兜底名匹配统一走 norm（去空白+小写），故常量表预先归一——'Sent Items' 归一后是 'sentitems'。
 const norm = (s) => String(s || '').toLowerCase().replace(/\s/g, '');
@@ -110,6 +125,21 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     return value;
   }
 
+  // 保留策略：只作用于本地缓存；Sent 永久；sent 探测失败/找不到 → 不清理（fail-safe）。
+  async function retentionCutoff(accountId, folder) {
+    const acc = await accountStore.get(accountId);
+    const retention = (acc && acc.retention) || 'forever';
+    if (retention === 'forever') return null;
+    try {
+      const sent = (await foldersImpl(accountId)).sent;
+      if (!sent || folder === sent) return null;
+      const days = RETENTION_DAYS[retention];
+      return days ? Date.now() - days * 86400000 : null;
+    } catch {
+      return null;
+    }
+  }
+
   async function envelopesImpl(accountId, folder, { page = 1, pageSize = 20, filter, force = false } = {}) {
     const size = Math.min(Math.max(Math.trunc(pageSize) || 20, 1), 50);
     const crit = {};
@@ -121,13 +151,14 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     }
     // 带 filter 时缓存（无过滤全量）不适用，须直拉 IMAP；纯浏览走缓存优先。
     const hasFilter = Object.keys(crit).length > 0;
+    const cutoffMs = await retentionCutoff(accountId, folder);
     let list;
     if (force || hasFilter) {
       const conn = await connOf(accountId);
       const uids = await withTimeout('search', conn.search(folder, crit));
       list = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
       // 仅无过滤全量才落缓存——带 filter 的直拉结果写入共享槽会污染 5min TTL 内的无 filter 查询（2026-11-05 修复）。
-      if (!hasFilter) cache.write(accountId, folder, list);
+      if (!hasFilter) cache.write(accountId, folder, list, { cutoffMs });
     } else {
       const cached = cache.read(accountId, folder);
       if (cached && Date.now() - cached.savedAt < CACHE_TTL_MS) {
@@ -136,9 +167,11 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
         const conn = await connOf(accountId);
         const uids = await withTimeout('search', conn.search(folder, {}));
         list = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
-        cache.write(accountId, folder, list);
+        cache.write(accountId, folder, list, { cutoffMs });
       }
     }
+    // 读缓存同样按当前配置过滤（改小保留期后立即生效，不必等下次重写）。
+    list = filterByAge(list, cutoffMs);
     // 列表恒为「uid 降序」（最新在前）——缓存/直拉统一排序后再分页，防最旧邮件顶到第一页。
     const sorted = [...list].sort((a, b) => b.uid - a.uid);
     const cur = Math.max(Math.trunc(page) || 1, 1);

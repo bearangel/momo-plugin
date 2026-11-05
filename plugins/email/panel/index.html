@@ -45,6 +45,11 @@
   .draft .ops { display: flex; gap: 8px; margin-top: 6px; }
   #confirm-bar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: var(--bg); border: 1px solid var(--bd); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 10px 14px; display: none; align-items: center; gap: 12px; z-index: 30; max-width: 80%; }
   #confirm-bar .msg { color: var(--tx); }
+  #compose { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; }
+  #compose .box { background: var(--bg); border: 1px solid var(--bd); border-radius: 10px; padding: 16px; width: 480px; display: flex; flex-direction: column; gap: 8px; max-height: 90vh; overflow: auto; }
+  #compose label { font-size: 11px; color: var(--tx2); }
+  #compose textarea { min-height: 160px; resize: vertical; }
+  #toast { position: fixed; left: 50%; top: 18px; transform: translateX(-50%); background: var(--tx); color: var(--bg); padding: 6px 14px; border-radius: 6px; display: none; z-index: 40; }
 </style>
 </head>
 <body>
@@ -54,6 +59,7 @@
   </div>
   <div class="col-mid">
     <div class="toolbar">
+      <button class="pri" onclick="openCompose()">写邮件</button>
       <input id="q" placeholder="搜索主题" style="flex:1" onkeydown="if(event.key==='Enter')reloadList()">
       <button onclick="reloadList(true)">刷新</button>
     </div>
@@ -79,6 +85,9 @@
       <div style="display:flex;gap:6px"><input id="f-sh" style="flex:1"><input id="f-sp" style="width:64px"><select id="f-st"><option value="tls">TLS(465)</option><option value="starttls">STARTTLS(587)</option></select></div>
       <label>用户名（通常=邮箱地址）</label><input id="f-user">
       <label>授权码 / 应用密码（不回显，存系统钥匙串）</label><input id="f-pw" type="password">
+      <label>本地缓存保留时长</label>
+      <select id="f-retention"><option value="forever">永久（默认）</option><option value="1y">一年</option><option value="6m">半年</option><option value="1m">一个月</option></select>
+      <div class="hint">仅影响本地缓存，不会删除服务器邮件；已发送永久保留</div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button onclick="closeAccountForm()">取消</button>
         <button onclick="testAccount()">测试连接</button>
@@ -87,6 +96,25 @@
       <div class="status" id="f-status"></div>
     </div>
   </div>
+
+  <div id="compose">
+    <div class="box">
+      <b>写邮件</b>
+      <label>收件人（逗号分隔）</label><input id="c-to" placeholder="someone@example.com">
+      <label>抄送（可选，逗号分隔）</label><input id="c-cc">
+      <label>主题</label><input id="c-subject">
+      <label>正文</label><textarea id="c-body"></textarea>
+      <label>附件（总量 ≤25MB）</label><input id="c-files" type="file" multiple>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="c-cancel" onclick="closeCompose()">取消</button>
+        <button id="c-draft" onclick="submitCompose('draft')">存草稿</button>
+        <button id="c-send" class="pri" onclick="submitCompose('send')">发送</button>
+      </div>
+      <div class="status" id="c-status"></div>
+    </div>
+  </div>
+
+  <div id="toast"></div>
 
   <div id="confirm-bar" style="display:none">
     <span class="msg"></span>
@@ -113,9 +141,10 @@
     delete pending[m.id];
   });
   function call(method, params) { return send('plugin:callService', { method: method, params: params || {} }); }
+  window.call = call;
 
   // 状态
-  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null };
+  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null, composeBusy: false };
   var PRESETS = {
     qq: { ih: 'imap.qq.com', ip: 993, it: 'tls', sh: 'smtp.qq.com', sp: 465, st: 'tls' },
     '163': { ih: 'imap.163.com', ip: 993, it: 'tls', sh: 'smtp.163.com', sp: 465, st: 'tls' },
@@ -286,7 +315,7 @@
   }
 
   // —— 账号表单 ——
-  function openAccountForm() { S.testOk = false; $('account-form').style.display = 'flex'; $('f-status').textContent = ''; }
+  function openAccountForm() { S.testOk = false; $('f-retention').value = 'forever'; $('account-form').style.display = 'flex'; $('f-status').textContent = ''; }
   function closeAccountForm() { $('account-form').style.display = 'none'; }
   // 任何表单改动都使既有「测试通过」失效——保存前必须重新测试（spec §5.2）
   function resetTestOk() { S.testOk = false; }
@@ -305,6 +334,7 @@
   }
   function formInput() {
     return { email: $('f-email').value.trim(), displayName: $('f-name').value.trim() || null, username: $('f-user').value.trim() || $('f-email').value.trim(), password: $('f-pw').value,
+      retention: $('f-retention').value,
       imap: { host: $('f-ih').value.trim(), port: Number($('f-ip').value), tlsMode: $('f-it').value },
       smtp: { host: $('f-sh').value.trim(), port: Number($('f-sp').value), tlsMode: $('f-st').value } };
   }
@@ -346,6 +376,79 @@
       .catch(function (e) { showListError('放弃草稿失败：' + e.message); });
   }
 
+  // —— 写邮件（SMTP 直发；复用 drafts.save → drafts.send 通道） ——
+  function openCompose() {
+    if (!S.accId) { showListError('请先添加账号'); return; }
+    S.composeBusy = false;
+    ['c-to', 'c-cc', 'c-subject', 'c-body'].forEach(function (id) { $(id).value = ''; });
+    $('c-files').value = '';
+    setComposeStatus('');
+    $('compose').style.display = 'flex';
+  }
+  function closeCompose() { if (S.composeBusy) return; $('compose').style.display = 'none'; }
+  function setComposeStatus(msg, isErr) {
+    var el = $('c-status');
+    el.className = 'status' + (isErr ? ' err' : '');
+    el.textContent = msg || '';
+  }
+  function toast(msg) {
+    var el = $('toast');
+    el.textContent = msg;
+    el.style.display = 'block';
+    setTimeout(function () { el.style.display = 'none'; }, 3500);
+  }
+  function splitList(v) { return String(v || '').split(',').map(function (x) { return x.trim(); }).filter(Boolean); }
+  function setComposeBusy(busy) {
+    S.composeBusy = busy;
+    $('c-send').disabled = busy;
+    $('c-draft').disabled = busy;
+    $('c-cancel').disabled = busy;
+  }
+  function readAttachments(files) {
+    return Promise.all(Array.prototype.map.call(files || [], function (f) {
+      return new Promise(function (resolve, reject) {
+        var r = new FileReader();
+        r.onload = function () { resolve({ filename: f.name, contentType: f.type || 'application/octet-stream', base64: String(r.result).split(',')[1] || '' }); };
+        r.onerror = function () { reject(new Error('读取附件失败：' + f.name)); };
+        r.readAsDataURL(f);
+      });
+    }));
+  }
+  function submitCompose(mode) {
+    if (S.composeBusy) return;
+    var to = splitList($('c-to').value);
+    if (mode === 'send' && to.length === 0) { setComposeStatus('请填写收件人', true); return; }
+    var files = $('c-files').files || [];
+    var total = 0;
+    for (var i = 0; i < files.length; i += 1) total += files[i].size;
+    if (total > 25 * 1024 * 1024) { setComposeStatus('附件总量超过 25MB 上限', true); return; }
+    var payload = { accountId: S.accId, to: to, cc: splitList($('c-cc').value), subject: $('c-subject').value.trim(), text: $('c-body').value, attachments: [] };
+    setComposeBusy(true);
+    setComposeStatus(mode === 'send' ? '正在发送…' : '正在保存草稿…');
+    readAttachments(files).then(function (attachments) {
+      payload.attachments = attachments;
+      if (mode !== 'send') {
+        return call('drafts.save', payload).then(function () {
+          setComposeBusy(false); $('compose').style.display = 'none'; toast('已存草稿'); reloadList(true);
+        });
+      }
+      return inlineConfirm('确认发送这封邮件？').then(function (ok) {
+        if (!ok) { setComposeBusy(false); setComposeStatus(''); return; }
+        return call('drafts.save', payload)
+          .then(function (d) { return call('drafts.send', { draftId: d.id }); })
+          .then(function (sent) {
+            var warn = (sent && sent.archiveWarning) || (sent && sent.deleteWarning);
+            setComposeBusy(false);
+            $('compose').style.display = 'none';
+            toast(warn ? '已发送；' + warn : '已发送');
+            reloadList(true);
+          });
+      });
+    }).catch(function (e) {
+      setComposeBusy(false);
+      setComposeStatus(e && e.message ? e.message : String(e), true);
+    });
+  }
   function pickAccount(id) {
     cancelConfirm();
     S.accId = id; S.folder = 'INBOX'; S.page = 1;

@@ -8,6 +8,14 @@ const crypto = require('node:crypto');
 const TLS_MODES = ['tls', 'starttls'];
 const PORT_MIN = 1;
 const PORT_MAX = 65535;
+const RETENTIONS = ['1m', '6m', '1y', 'forever'];
+const DEFAULT_RETENTION = 'forever';
+
+function checkRetention(value) {
+  if (value !== undefined && !RETENTIONS.includes(value)) {
+    throw new Error(`retention 非法（仅支持 ${RETENTIONS.join('/')}）: ${value}`);
+  }
+}
 
 /** 常见邮箱预设（表单一键填充；仍可全自定义） */
 const PRESETS = {
@@ -52,8 +60,8 @@ function createAccountStore({ dataDir, secrets }) {
   return {
     PRESETS, presetFor,
     async list() {
-      return readAll().map(({ id, email, displayName, username, imap, smtp, createdAt, health }) =>
-        ({ id, email, displayName, username, imap, smtp, createdAt, health }));
+      return readAll().map(({ id, email, displayName, username, imap, smtp, createdAt, health, retention }) =>
+        ({ id, email, displayName, username, imap, smtp, createdAt, health, retention: retention || DEFAULT_RETENTION }));
     },
     async get(id) { return readAll().find((r) => r.id === id) || null; },
     async add(input) {
@@ -61,10 +69,12 @@ function createAccountStore({ dataDir, secrets }) {
       if (rows.some((r) => r.email === input.email)) throw new Error(`邮箱已存在: ${input.email}`);
       checkEndpoint('imap', input.imap);
       checkEndpoint('smtp', input.smtp);
+      checkRetention(input.retention);
       const { password, ...meta } = input;
       const rec = {
         id: 'acc_' + crypto.randomUUID(),
         createdAt: new Date().toISOString(),
+        retention: input.retention || DEFAULT_RETENTION,
         health: { state: 'unknown' },
         ...meta,
         imap: { ...input.imap },
@@ -87,6 +97,7 @@ function createAccountStore({ dataDir, secrets }) {
       if (i < 0) throw new Error(`账号不存在: ${id}`);
       if (patch.imap) checkEndpoint('imap', { ...rows[i].imap, ...patch.imap });
       if (patch.smtp) checkEndpoint('smtp', { ...rows[i].smtp, ...patch.smtp });
+      checkRetention(patch.retention);
       const next = { ...rows[i], ...patch, id: rows[i].id, createdAt: rows[i].createdAt };
       delete next.password; // 永不经 update 落密码
       rows[i] = next;
@@ -112,4 +123,4 @@ function createAccountStore({ dataDir, secrets }) {
   };
 }
 
-module.exports = { createAccountStore, PRESETS, presetFor };
+module.exports = { createAccountStore, PRESETS, presetFor, RETENTIONS, DEFAULT_RETENTION };

@@ -46,6 +46,8 @@ describe.skipIf(!HOST_READY)('email panel', () => {
       'mail-tools', '显示远程图片', '远程图片已屏蔽',
       'img-src data: cid:', 'https: http:', 'flex:1',
       'sandbox=""', 'Content-Security-Policy', 'typeof m.html === \'string\'', 'Promise.all',
+      'id="f-retention"', '<option value="forever">', '<option value="1y">', '<option value="6m">', '<option value="1m">',
+      '写邮件', 'id="compose"', 'id="c-files"', 'type="file"', '存草稿', 'drafts.save', 'drafts.send',
     ]) {
       expect(html).toContain(anchor);
     }
