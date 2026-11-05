@@ -68,6 +68,14 @@ describe('mailbox', () => {
     expect(f2.sent).toBe('Sent Items');
   });
 
+  it('resolveAppendedUid：按 X-Momo-Draft-Id 反查取最大 uid；未命中 0', async () => {
+    const conn = makeImap({ uids: [4, 9, 7] });
+    await expect(makeMailbox(conn).resolveAppendedUid('acc1', '草稿箱', 'draft_x')).resolves.toBe(9);
+    expect(conn.lastCrit).toEqual({ header: { 'X-Momo-Draft-Id': 'draft_x' } });
+    const miss = makeImap({ uids: [] });
+    await expect(makeMailbox(miss).resolveAppendedUid('acc1', '草稿箱', 'nope')).resolves.toBe(0);
+  });
+
   it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新；uid 降序分页', async () => {
     const conn = makeImap();
     const mb = makeMailbox(conn);

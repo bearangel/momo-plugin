@@ -18,8 +18,13 @@ function toView(rec) {
     attachmentNames: rec.attachmentNames,
     createdAt: rec.createdAt, sentAt: rec.sentAt, lastError: rec.lastError,
     expireReason: rec.expireReason ?? null,
+    archiveWarning: rec.archiveWarning ?? null,
+    deleteWarning: rec.deleteWarning ?? null,
   };
 }
+
+const DELETE_WARNING = '已发送，但草稿箱副本未能删除';
+const ARCHIVE_WARNING = '已发送，但未能归档到「已发送」文件夹（部分服务商会自动归档）';
 
 function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, mailbox, totalTimeoutMs = 8000 }) {
   const file = path.join(dataDir, 'drafts.json');
@@ -44,6 +49,15 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
     fs.writeFileSync(tmp, JSON.stringify(rows, null, 2), 'utf-8');
     fs.renameSync(tmp, file);
   };
+  // uid 缺失（APPEND 无 uid）时按草稿标记反查；反查失败不阻断主流程，返回 0 让调用方告警。
+  const resolveUid = async (accountId, folder, draftId) => {
+    if (typeof mailbox.resolveAppendedUid !== 'function') return 0;
+    try {
+      return Number(await mailbox.resolveAppendedUid(accountId, folder, draftId)) || 0;
+    } catch {
+      return 0;
+    }
+  };
   const patch = (id, fn) => {
     const rows = readAll();
     const i = rows.findIndex((r) => r.id === id);
@@ -59,15 +73,18 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
         // input: { accountId, account, to: string[], cc: string[], subject, text, attachments: [{filename, contentType, data: Buffer}] }
         const total = (input.attachments || []).reduce((n, a) => n + (a.data ? a.data.length : 0), 0);
         if (total > ATTACH_TOTAL_MAX) throw new Error(`附件总量超过 25MB 上限（${total} 字节）`);
+        // 先定 id 再渲染：报文头内嵌标记，供 APPEND 无 uid 时反查定位。
+        const id = 'draft_' + crypto.randomUUID();
         const mailInput = {
           from: input.account.email, to: input.to, cc: input.cc || [],
           subject: input.subject, text: input.text, attachments: input.attachments || [],
         };
-        const raw = await renderMail(mailInput);
+        const raw = await renderMail({ ...mailInput, extraHeaders: { 'X-Momo-Draft-Id': id } });
         const folder = await mailbox.draftsFolder(input.accountId);
-        const uid = await mailbox.append(input.accountId, folder, raw);
+        const appendUid = Number(await mailbox.append(input.accountId, folder, raw)) || 0;
+        const uid = appendUid || await resolveUid(input.accountId, folder, id);
         const rec = {
-          id: 'draft_' + crypto.randomUUID(), accountId: input.accountId, uid, status: 'pending',
+          id, accountId: input.accountId, uid, status: 'pending',
           to: input.to, cc: input.cc || [], subject: input.subject, fromAddr: input.account.email,
           summary: String(input.text || '').slice(0, 120),
           attachmentNames: (input.attachments || []).map((a) => a.filename),
@@ -119,10 +136,29 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
           throw new Error(`发送失败（草稿已保留可重试）: ${msg}`);
         }
         // ——— 此线以下邮件已物理发出：一切失败不得再产生「可重试」语义（I-1）———
-        await mailbox.append(rec.accountId, sent, raw).catch(() => undefined); // Sent 归档失败不阻断
-        await mailbox.deleteMessage(rec.accountId, draftsFolder, rec.uid).catch(() => undefined);
+        let archiveWarning = null;
         try {
-          return toView(patch(id, (r) => ({ ...r, status: 'sent', sentAt: now().toISOString(), lastError: null })));
+          await mailbox.append(rec.accountId, sent, raw);
+        } catch {
+          archiveWarning = ARCHIVE_WARNING;
+        }
+        let deleteWarning = null;
+        let delUid = Number(rec.uid) || 0;
+        if (!delUid) delUid = await resolveUid(rec.accountId, draftsFolder, rec.id);
+        if (delUid) {
+          try {
+            await mailbox.deleteMessage(rec.accountId, draftsFolder, delUid);
+          } catch {
+            deleteWarning = DELETE_WARNING;
+          }
+        } else {
+          deleteWarning = DELETE_WARNING;
+        }
+        try {
+          return toView(patch(id, (r) => ({
+            ...r, status: 'sent', sentAt: now().toISOString(), lastError: null,
+            archiveWarning, deleteWarning,
+          })));
         } catch (err) {
           const msg = String((err && err.message) || err);
           throw new Error(`发送已完成但登记失败: ${msg}（请勿重发，可在面板核对）`);
@@ -136,11 +172,22 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
       const rec = readAll().find((r) => r.id === id);
       if (!rec) return;
       if (rec.status === 'sent') return; // M-1 终态不可越：已发送记录不删信不再改状态
+      let deleteWarning = null;
       if (rec.status === 'pending') {
         const folder = await mailbox.draftsFolder(rec.accountId);
-        await mailbox.deleteMessage(rec.accountId, folder, rec.uid).catch(() => undefined);
+        let delUid = Number(rec.uid) || 0;
+        if (!delUid) delUid = await resolveUid(rec.accountId, folder, rec.id);
+        if (delUid) {
+          try {
+            await mailbox.deleteMessage(rec.accountId, folder, delUid);
+          } catch {
+            deleteWarning = '已放弃，但草稿箱副本未能删除';
+          }
+        } else {
+          deleteWarning = '已放弃，但草稿箱副本未能删除';
+        }
       }
-      patch(id, (r) => ({ ...r, status: 'discarded' }));
+      patch(id, (r) => ({ ...r, status: 'discarded', ...(deleteWarning ? { deleteWarning } : {}) }));
     },
     async sweep() {
       const cutoff = now().getTime() - EXPIRE_MS;

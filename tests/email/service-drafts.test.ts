@@ -10,26 +10,35 @@ let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-drafts-')); });
 afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 
-function makeHarness(over: { smtpSend?: (accId: string, raw: Buffer, envelope: unknown) => Promise<void> } = {}) {
+function makeHarness(over: {
+  smtpSend?: (accId: string, raw: Buffer, envelope: unknown) => Promise<void>;
+  append?: (accId: string, folder: string, raw: Buffer) => Promise<number>;
+  resolveAppendedUid?: (accId: string, folder: string, draftId: string) => Promise<number>;
+} = {}) {
   const appended: Array<{ folder: string; raw: Buffer }> = [];
   const deleted: Array<{ folder: string; uid: number }> = [];
+  const renderInputs: Array<{ subject: string; extraHeaders?: Record<string, string> }> = [];
   let sentEnv: unknown = null;
   let sentRaw: Buffer | null = null;
   const mailbox = {
     draftsFolder: async () => 'Drafts',
     sentFolder: async () => 'Sent',
-    append: async (_acc: string, folder: string, raw: Buffer) => { appended.push({ folder, raw }); return 100 + appended.length; },
+    append: over.append ?? (async (_acc: string, folder: string, raw: Buffer) => { appended.push({ folder, raw }); return 100 + appended.length; }),
     deleteMessage: async (_acc: string, folder: string, uid: number) => { deleted.push({ folder, uid }); },
+    resolveAppendedUid: over.resolveAppendedUid ?? (async () => 0),
   };
   let nowMs = Date.parse('2026-11-05T10:00:00Z');
   const drafts = createDrafts({
     dataDir: dir,
     now: () => new Date(nowMs),
-    renderMail: async (i: { subject: string }) => Buffer.from(`RAW:${i.subject}`),
+    renderMail: async (i: { subject: string; extraHeaders?: Record<string, string> }) => {
+      renderInputs.push(i);
+      return Buffer.from(`RAW:${i.subject}`);
+    },
     smtpSend: over.smtpSend ?? (async (_accId: string, raw: Buffer, envelope: unknown) => { sentRaw = raw; sentEnv = envelope; }),
     mailbox,
   });
-  return { drafts, appended, deleted, sentEnv: () => sentEnv, sentRaw: () => sentRaw, setNow: (ms: number) => { nowMs = ms; } };
+  return { drafts, appended, deleted, renderInputs, sentEnv: () => sentEnv, sentRaw: () => sentRaw, setNow: (ms: number) => { nowMs = ms; } };
 }
 
 const ACCOUNT = { id: 'acc1', email: 'me@qq.com' };
@@ -50,6 +59,53 @@ describe('drafts state machine', () => {
     expect(h.deleted[0]!.folder).toBe('Drafts');
     expect(h.sentRaw()!.toString()).toBe('RAW:报价');
     expect(h.sentEnv()).toMatchObject({ from: 'me@qq.com', to: ['x@y.z'] });
+  });
+
+  it('save：APPEND 无 uid → 按 X-Momo-Draft-Id 反查得 uid；raw 头带标记', async () => {
+    const h = makeHarness({ append: async () => 0, resolveAppendedUid: async () => 7 });
+    const d = await h.drafts.save(INPUT);
+    expect(h.renderInputs[0]!.extraHeaders).toEqual({ 'X-Momo-Draft-Id': d.id });
+    expect((await h.drafts.get(d.id))!.uid).toBe(7);
+  });
+
+  it('send：uid=7 → deleteMessage(Drafts,7)', async () => {
+    const h = makeHarness({ append: async () => 0, resolveAppendedUid: async () => 7 });
+    const d = await h.drafts.save(INPUT);
+    await h.drafts.send(d.id);
+    expect(h.deleted).toEqual([{ folder: 'Drafts', uid: 7 }]);
+  });
+
+  it('send：uid=0 且反查失败 → 状态 sent + deleteWarning（不静默）', async () => {
+    const h = makeHarness({ append: async () => 0, resolveAppendedUid: async () => 0 });
+    const d = await h.drafts.save(INPUT);
+    const sent = await h.drafts.send(d.id);
+    expect(sent.status).toBe('sent');
+    expect(sent.deleteWarning).toBeTruthy();
+    expect(h.deleted).toHaveLength(0);
+  });
+
+  it('send：Sent 归档失败 → 状态 sent + archiveWarning（不误报可重试）', async () => {
+    const h = makeHarness({
+      append: async (_a, folder) => {
+        if (folder === 'Sent') throw new Error('append failed');
+        return 7;
+      },
+    });
+    const d = await h.drafts.save(INPUT);
+    const sent = await h.drafts.send(d.id);
+    expect(sent.status).toBe('sent');
+    expect(sent.archiveWarning).toContain('已发送');
+    expect(sent.deleteWarning).toBeNull();
+    expect(JSON.stringify(sent)).not.toContain('可重试');
+  });
+
+  it('discard：uid=0 且反查失败 → 状态 discarded + deleteWarning', async () => {
+    const h = makeHarness({ append: async () => 0, resolveAppendedUid: async () => 0 });
+    const d = await h.drafts.save(INPUT);
+    await h.drafts.discard(d.id);
+    const rec = await h.drafts.get(d.id);
+    expect(rec!.status).toBe('discarded');
+    expect(rec!.deleteWarning).toBeTruthy();
   });
 
   it('send 拒绝：不存在 / 已 sent（重放拒绝）', async () => {

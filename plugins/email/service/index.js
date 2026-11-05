@@ -52,6 +52,7 @@ function imapAdapterFor(ImapFlow) {
       list: async () => (await client.list()).map((f) => ({ path: f.path, specialUse: f.specialUse || null })),
       search: async (folder, crit) => {
         const s = { ...crit };
+        if (crit.header) s.header = { ...crit.header };
         if (Object.keys(s).length === 0) s.all = true;
         return withMailbox(folder, async () => (await client.search(s, { uid: true })) ?? []);
       },

@@ -162,6 +162,12 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
       const conn = await connOf(accountId);
       return withTimeout('append', conn.append(folder, raw));
     },
+    // APPEND 响应可能不含 uid（QQ 实测只有 {destination,path}）——按报文内嵌标记反查，取最新（最大）uid。
+    async resolveAppendedUid(accountId, folder, draftId) {
+      const conn = await connOf(accountId);
+      const uids = await withTimeout('定位草稿', conn.search(folder, { header: { 'X-Momo-Draft-Id': draftId } }));
+      return (uids || []).reduce((max, u) => (Number(u) > max ? Number(u) : max), 0);
+    },
     async deleteMessage(accountId, folder, uid) {
       const conn = await connOf(accountId);
       return withTimeout('delete', conn.deleteMessage(folder, uid));

@@ -16,6 +16,7 @@ class FakeImapFlow {
   opts: unknown;
   selectedFolder: string | null = null;
   openedFolders: string[] = [];
+  lastSearch: unknown = null;
   constructor(opts: unknown) { this.opts = opts; }
   async connect() {}
   async logout() {}
@@ -25,8 +26,9 @@ class FakeImapFlow {
     this.openedFolders.push(folder);
     return { release: () => {} };
   }
-  async search() {
+  async search(crit?: unknown) {
     if (!this.selectedFolder) throw new Error('No mailbox selected');
+    this.lastSearch = crit;
     return [1];
   }
   async *fetch() {
@@ -146,6 +148,22 @@ describe('service index', () => {
       .rejects.toThrow('AUTHENTICATIONFAILED');
     const after = (await svc.handle('accounts.list', {})) as Array<{ health: { state: string } }>;
     expect(after[0]!.health.state).toBe('error');
+  });
+
+  it('adapter search 透传 header 条件（APPEND 无 uid 时按 X-Momo-Draft-Id 反查）', async () => {
+    let fake: FakeImapFlow | null = null;
+    class NoUid extends FakeImapFlow {
+      constructor(o: unknown) {
+        super(o);
+        fake = this;
+        (this as unknown as { append: unknown }).append = async () => ({ destination: 'Drafts', path: 'Drafts' });
+      }
+    }
+    const svc = buildService(makeDeps({ imapflow: NoUid }));
+    await svc.handle('accounts.add', ACC_INPUT);
+    const accId = (await svc.handle('accounts.list', {}))[0].id;
+    const d = await svc.handle('drafts.save', { accountId: accId, to: 'x@y.z', subject: 'S', text: 'T' });
+    expect(fake!.lastSearch).toEqual({ header: { 'X-Momo-Draft-Id': d.id } });
   });
 
   it('drafts.save（base64 附件）→ drafts.send 状态机全链', async () => {
