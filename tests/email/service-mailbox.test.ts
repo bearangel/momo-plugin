@@ -76,6 +76,45 @@ describe('mailbox', () => {
     await expect(makeMailbox(miss).resolveAppendedUid('acc1', '草稿箱', 'nope')).resolves.toBe(0);
   });
 
+  it('folders：60s 内存缓存 + invalidateFolders 失效', async () => {
+    const conn = makeImap();
+    const mb = makeMailbox(conn);
+    await mb.folders('acc1');
+    await mb.folders('acc1');
+    expect(conn.calls.filter((c) => c === 'list')).toHaveLength(1);
+    mb.invalidateFolders('acc1');
+    await mb.folders('acc1');
+    expect(conn.calls.filter((c) => c === 'list')).toHaveLength(2);
+  });
+
+  it('folders：status 失败 best-effort——不抛、unseen 计 0、候选字段置 null', async () => {
+    const conn = makeImap({ list: [
+      { path: 'INBOX', specialUse: '\\Inbox' },
+      { path: '草稿箱', specialUse: '\\Drafts' },
+      { path: '已发送', specialUse: '\\Sent' },
+    ] });
+    (conn as unknown as { status: unknown }).status = async (folder: string) => {
+      if (folder === '已发送') throw new Error("Mailbox doesn't exist: 已发送");
+      return { unseen: 2 };
+    };
+    const f = await makeMailbox(conn).folders('acc1');
+    expect(f.sent).toBeNull();
+    expect(f.unseen['已发送']).toBe(0);
+    expect(f.drafts).toBe('草稿箱');
+  });
+
+  it('folders：modified-UTF-7 名称匹配（新浪路径），status 失败则 sent=null', async () => {
+    const path = '&YhF2hJHNiYFlh072-/已发送';
+    const ok = makeImap({ list: [{ path: 'INBOX' }, { path }] });
+    expect((await makeMailbox(ok).folders('acc1')).sent).toBe(path);
+    const broken = makeImap({ list: [{ path: 'INBOX' }, { path }] });
+    (broken as unknown as { status: unknown }).status = async (p: string) => {
+      if (p === path) throw new Error("Mailbox doesn't exist");
+      return { unseen: 0 };
+    };
+    expect((await makeMailbox(broken).folders('acc1')).sent).toBeNull();
+  });
+
   it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新；uid 降序分页', async () => {
     const conn = makeImap();
     const mb = makeMailbox(conn);
@@ -168,14 +207,14 @@ describe('mailbox', () => {
     await expect(makeMailbox(hang).envelopes('acc1', 'INBOX', {})).rejects.toThrow('超时');
   });
 
-  it('folders 整链总预算：list 30ms + 3×status 20ms > 60ms → 整链超时（残留 1）', async () => {
+  it('folders 整链总预算：list 40ms + status 并行 30ms > 60ms → 整链超时（残留 1）', async () => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const slow = makeImap();
     (slow as unknown as { list: unknown }).list = async () => {
-      await delay(30);
+      await delay(40);
       return [{ path: 'INBOX' }, { path: 'Drafts' }, { path: 'Sent' }];
     };
-    (slow as unknown as { status: unknown }).status = async () => { await delay(20); return { unseen: 0 }; };
+    (slow as unknown as { status: unknown }).status = async () => { await delay(30); return { unseen: 0 }; };
     await expect(makeMailbox(slow).folders('acc1')).rejects.toThrow('超时');
   });
 

@@ -216,9 +216,11 @@
   }
 
   function renderDraftBox() {
+    // 只在草稿箱拉草稿：避免每次切账号/翻页都多打一次 drafts.list。
+    if (!S.folders || S.folder !== S.folders.drafts) return;
     call('drafts.list').then(function (ds) {
       var pendingDrafts = (ds || []).filter(function (d) { return d.status === 'pending' && d.accountId === S.accId; });
-      if (S.folder !== (S.folders && S.folders.drafts) || pendingDrafts.length === 0) return;
+      if (S.folder !== S.folders.drafts || pendingDrafts.length === 0) return;
       var h = '<div style="padding:8px 10px;border-bottom:1px solid var(--bd)"><b>待确认草稿（' + pendingDrafts.length + '）</b></div>';
       pendingDrafts.forEach(function (d) {
         h += '<div class="mail draft" style="margin:0"><div class="subj">→ ' + esc((d.to || []).join(', ')) + '：' + esc(d.subject) + '</div>' +
@@ -344,7 +346,22 @@
       .catch(function (e) { showListError('放弃草稿失败：' + e.message); });
   }
 
-  function pickAccount(id) { cancelConfirm(); S.accId = id; S.folder = 'INBOX'; S.page = 1; call('folders.list', { accountId: id }).then(function (f) { S.folders = f; renderAccounts(); reloadList(); }).catch(function (e) { showListError('文件夹列表加载失败：' + e.message); }); }
+  function pickAccount(id) {
+    cancelConfirm();
+    S.accId = id; S.folder = 'INBOX'; S.page = 1;
+    // 并发拉取：文件夹树与首屏列表互不依赖，切账号不再串行等两次 RPC。
+    Promise.all([
+      call('folders.list', { accountId: id }),
+      call('mails.list', { accountId: id, folder: 'INBOX', page: 1, pageSize: S.pageSize, filter: {} }),
+    ]).then(function (r) {
+      S.folders = r[0];
+      S.mails = r[1].items || [];
+      S.total = r[1].total || 0;
+      renderAccounts();
+      renderList();
+      renderDraftBox();
+    }).catch(function (e) { showListError('文件夹列表加载失败：' + e.message); });
+  }
   function pickFolder(p) { S.folder = p; S.page = 1; renderAccounts(); reloadList(); }
   function turnPage(d) { S.page = Math.max(1, S.page + d); reloadList(); }
 

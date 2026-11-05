@@ -2,17 +2,33 @@
 // 连接复用：每账号一条，10min 空闲回收。
 'use strict';
 
+const { decodeModifiedUtf7 } = require('./utf7');
+
 const CACHE_TTL_MS = 5 * 60 * 1000;
 const READ_SOURCE_MAX = 2 * 1024 * 1024;   // read_mail 全源上限
 const TEXT_TRUNCATE = 200 * 1024;           // 正文截断
 const ATTACH_MAX = 10 * 1024 * 1024;        // 附件 RPC 上限
 const IDLE_MS = 10 * 60 * 1000;             // 连接空闲回收
 const READ_CACHE_MAX = 50;                  // 正文内存 LRU 容量
+const FOLDERS_TTL_MS = 60 * 1000;           // 文件夹树缓存（切账号体感）
 
 // 兜底名匹配统一走 norm（去空白+小写），故常量表预先归一——'Sent Items' 归一后是 'sentitems'。
 const norm = (s) => String(s || '').toLowerCase().replace(/\s/g, '');
 const DRAFT_NAMES = ['drafts', '草稿箱', '草稿', 'draft'].map(norm);
-const SENT_NAMES = ['sent', '已发送', '已发送邮件', 'sent messages', 'sent items'].map(norm);
+const SENT_NAMES = ['sent', '已发送', '已发送邮件', '发件箱', 'sent messages', 'sent items'].map(norm);
+
+function findFolder(raw, specialUse, names) {
+  const special = raw.find((f) => f.specialUse === specialUse);
+  if (special) return special.path;
+  // path/name 的原样 + modified-UTF-7 解码 + 末段（新浪等以编码父路径出现）都要比对
+  const variants = (f) => [f.path, f.name]
+    .filter((v) => typeof v === 'string')
+    .flatMap((v) => {
+      const d = decodeModifiedUtf7(v);
+      return [norm(v), norm(d), norm(v.split('/').pop()), norm(d.split('/').pop())];
+    });
+  return raw.find((f) => variants(f).some((v) => names.includes(v)))?.path ?? null;
+}
 
 function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutMs = 30000 }) {
   const conns = new Map(); // accountId → { conn, lastUsed }
@@ -49,20 +65,39 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     if (readCache.size > READ_CACHE_MAX) readCache.delete(readCache.keys().next().value);
   };
 
-  async function foldersImpl(accountId) {
+  const foldersCache = new Map(); // accountId → { value, at }
+
+  async function probeFolders(accountId) {
     const conn = await connOf(accountId);
     const raw = await withTimeout('list', conn.list());
-    const drafts = raw.find((f) => f.specialUse === '\\Drafts')?.path
-      ?? raw.find((f) => DRAFT_NAMES.includes(norm(f.path)))?.path ?? null;
-    const sent = raw.find((f) => f.specialUse === '\\Sent')?.path
-      ?? raw.find((f) => SENT_NAMES.includes(norm(f.path)))?.path ?? null;
-    const paths = [...new Set(['INBOX', drafts, sent].filter(Boolean))];
+    const draftsCand = findFolder(raw, '\\Drafts', DRAFT_NAMES);
+    const sentCand = findFolder(raw, '\\Sent', SENT_NAMES);
     const unseen = {};
-    for (const p of paths) {
-      const st = await withTimeout('status', conn.status(p));
-      unseen[p] = Number(st?.unseen ?? 0);
-    }
-    return { all: raw, drafts, sent, unseen };
+    // status 一律 best-effort：目录名猜错（尤其 modified-UTF-7 的垃圾路径）不得让整个列表失败
+    const statusOf = async (path) => {
+      try {
+        const st = await withTimeout('status', conn.status(path));
+        unseen[path] = Number(st?.unseen ?? 0);
+        return true;
+      } catch {
+        unseen[path] = 0;
+        return false;
+      }
+    };
+    const [, draftsOk, sentOk] = await Promise.all([
+      statusOf('INBOX'),
+      draftsCand ? statusOf(draftsCand) : Promise.resolve(false),
+      sentCand ? statusOf(sentCand) : Promise.resolve(false),
+    ]);
+    return { all: raw, drafts: draftsOk ? draftsCand : null, sent: sentOk ? sentCand : null, unseen };
+  }
+
+  async function foldersImpl(accountId) {
+    const hit = foldersCache.get(accountId);
+    if (hit && Date.now() - hit.at < FOLDERS_TTL_MS) return hit.value;
+    const value = await probeFolders(accountId);
+    foldersCache.set(accountId, { value, at: Date.now() });
+    return value;
   }
 
   async function envelopesImpl(accountId, folder, { page = 1, pageSize = 20, filter, force = false } = {}) {
@@ -152,6 +187,7 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     CACHE_TTL_MS,
     // list + 3×status 在同一连接上串行（≈4 RTT），整链同样受单次调用总预算约束。
     folders: (accountId) => withTimeout('文件夹列表', foldersImpl(accountId)),
+    invalidateFolders(accountId) { foldersCache.delete(accountId); },
     async draftsFolder(accountId) { return (await foldersImpl(accountId)).drafts ?? 'INBOX'; },
     async sentFolder(accountId) { return (await foldersImpl(accountId)).sent ?? 'INBOX'; },
     // 单次 service 调用总预算：整条链（选箱/search/fetch/parse）受 opTimeoutMs 约束，内部单操作超时保留。
@@ -180,4 +216,4 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
   };
 }
 
-module.exports = { createMailbox, CACHE_TTL_MS };
+module.exports = { createMailbox, CACHE_TTL_MS, FOLDERS_TTL_MS };

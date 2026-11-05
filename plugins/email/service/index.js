@@ -132,8 +132,16 @@ function buildService(deps) {
   const ROUTES = {
     'accounts.list': () => accountStore.list(),
     'accounts.add': (p) => accountStore.add(p),
-    'accounts.update': (p) => accountStore.update(p.id, p.patch ?? {}),
-    'accounts.delete': (p) => accountStore.remove(p.id),
+    'accounts.update': async (p) => {
+      const r = await accountStore.update(p.id, p.patch ?? {});
+      mailbox.invalidateFolders(p.id);
+      return r;
+    },
+    'accounts.delete': async (p) => {
+      const r = await accountStore.remove(p.id);
+      mailbox.invalidateFolders(p.id);
+      return r;
+    },
     'accounts.test': async (p) => {
       const acc = (await accountStore.list()).find((a) => a.email === p.email);
       // 先测后存：表单直测（账号尚未落库）——用入参临时探测，不写 accounts.json、不写 secrets
