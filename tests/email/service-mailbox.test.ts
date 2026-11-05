@@ -425,3 +425,84 @@ describe('mailbox', () => {
 
   it('TTL 常量 5min', () => { expect(CACHE_TTL_MS).toBe(300000); });
 });
+
+describe('mailbox 本地归档优先（2026-11-05 归档 spec §7）', () => {
+  function simpleParser() {
+    return async (raw: Buffer) => {
+      const s = raw.toString('utf8');
+      const subject = /Subject: (.*)/.exec(s)?.[1] ?? '';
+      const from = /From: (.*)/.exec(s)?.[1] ?? '';
+      return { subject, from: { text: from }, to: { text: 'me@qq.com' }, text: s.split('\r\n\r\n')[1] ?? '',
+        html: null, date: new Date('2026-11-05T09:00:00Z'),
+        attachments: [{ partId: '1.1', filename: 'a.pdf', contentType: 'application/pdf', content: Buffer.from('pdf') }] };
+    };
+  }
+  function fakeArchive(files: Map<string, Buffer>) {
+    const written: Array<{ accountId: string; folder: string; uid: number; raw: Buffer }> = [];
+    return {
+      written,
+      async read(accountId: string, folder: string, uid: number) {
+        const raw = files.get(`${accountId}|${folder}|${uid}`);
+        return raw ? { raw } : null;
+      },
+      async write(accountId: string, folder: string, uid: number, raw: Buffer) {
+        written.push({ accountId, folder, uid, raw });
+        return { stored: true };
+      },
+    };
+  }
+
+  it('归档命中 → 不触 IMAP；subject/from 自解析兜底', async () => {
+    const files = new Map([['acc1|INBOX|1', Buffer.from('From: local@x.y\r\nSubject: 本地信\r\n\r\n本地正文')]]);
+    const arc = fakeArchive(files);
+    const conn = makeImap();
+    const mb = makeMailbox(conn, { archive: arc, parseMail: simpleParser() });
+    const view = await mb.read('acc1', 'INBOX', 1);
+    expect(view.subject).toBe('本地信');
+    expect(String(view.text)).toContain('本地正文');
+    expect(conn.calls).toHaveLength(0);
+  });
+
+  it('归档缺失 → IMAP 回退成功并异步回填原文', async () => {
+    const arc = fakeArchive(new Map());
+    const mb = makeMailbox(makeImap(), { archive: arc, parseMail: simpleParser() });
+    const view = await mb.read('acc1', 'INBOX', 1);
+    expect(view.subject).toBe('s1');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(arc.written).toHaveLength(1);
+    expect(arc.written[0]!.raw.toString()).toBe('SRC:INBOX:1');
+  });
+
+  it('归档损坏（read 返回 null）→ 回退 IMAP 不报错', async () => {
+    const arc = fakeArchive(new Map());
+    const mb = makeMailbox(makeImap(), { archive: arc });
+    const view = await mb.read('acc1', 'INBOX', 2);
+    expect(String(view.text)).toBe('正文');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(arc.written).toHaveLength(1);
+  });
+
+  it('attachment 本地优先；本地缺失回退 IMAP 并回填', async () => {
+    const files = new Map([['acc1|INBOX|1', Buffer.from('From: a@b\r\nSubject: att\r\n\r\nbody')]]);
+    const arc = fakeArchive(files);
+    const conn = makeImap();
+    const mb = makeMailbox(conn, { archive: arc, parseMail: simpleParser() });
+    const att = await mb.attachment('acc1', 'INBOX', 1, '1.1');
+    expect(att.filename).toBe('a.pdf');
+    expect(conn.calls).toHaveLength(0);
+
+    const arc2 = fakeArchive(new Map());
+    const conn2 = makeImap();
+    const mb2 = makeMailbox(conn2, { archive: arc2 });
+    const att2 = await mb2.attachment('acc1', 'INBOX', 1, '1.1');
+    expect(att2.filename).toBe('a.pdf');
+    expect(conn2.calls).toContain('source');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(arc2.written).toHaveLength(1);
+  });
+
+  it('导出 retentionCutoff（T6 消费契约）：forever → null', async () => {
+    const mb = makeMailbox(makeImap());
+    expect(await (mb as unknown as { retentionCutoff(a: string, f: string): Promise<number | null> }).retentionCutoff('acc1', 'INBOX')).toBeNull();
+  });
+});

@@ -49,7 +49,7 @@ function findFolders(raw, specialUse, names) {
   return out;
 }
 
-function createMailbox({ accountStore, cache, imapConnect, parseMail, store, opTimeoutMs = 30000 }) {
+function createMailbox({ accountStore, cache, imapConnect, parseMail, store, archive, opTimeoutMs = 30000 }) {
   const conns = new Map(); // accountId → { conn, lastUsed }
   const readCache = new Map(); // `${accountId}|${folder}|${uid}` → read 结果（Map 迭代序即 LRU 序）
 
@@ -225,10 +225,49 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, opT
     return { items: sorted.slice(start, start + size), total: sorted.length, page: cur, pageSize: size };
   }
 
+  function buildReadView(uid, env, parsed) {
+    const text = String(parsed.text || '');
+    const textTruncated = text.length > TEXT_TRUNCATE;
+    const htmlRaw = typeof parsed.html === 'string' && parsed.html.trim() !== '' ? parsed.html : null;
+    const htmlTruncated = htmlRaw != null && htmlRaw.length > TEXT_TRUNCATE;
+    return {
+      uid, subject: env.subject, from: env.from, to: env.to, date: env.date, seen: env.seen,
+      text: textTruncated ? text.slice(0, TEXT_TRUNCATE) + '\n…（已截断，全文 200KB 上限）' : text,
+      html: htmlTruncated ? htmlRaw.slice(0, TEXT_TRUNCATE) + '\n…（已截断，全文 200KB 上限）' : htmlRaw,
+      truncated: textTruncated || htmlTruncated,
+      attachments: (parsed.attachments || []).map((a) => ({
+        partId: a.partId, filename: a.filename, contentType: a.contentType, size: a.content ? a.content.length : 0,
+      })),
+    };
+  }
+
+  // 归档信封兜底：信封缓存缺失时自解析补 subject/from/to/date（seen 不可知按 false）
+  const envOfParsed = (uid, parsed) => ({
+    uid,
+    subject: parsed.subject ?? '',
+    from: parsed.from?.text ?? '',
+    to: parsed.to?.text ?? '',
+    date: parsed.date instanceof Date ? parsed.date.toISOString() : (parsed.date ?? null),
+    seen: false,
+  });
+
   async function readImpl(accountId, folder, uid) {
     const key = `${accountId}|${folder}|${uid}`;
     const cached = readCacheGet(key);
     if (cached) return cached;
+    if (archive) {
+      const hit = await archive.read(accountId, folder, uid);
+      if (hit) {
+        if (hit.raw.length > READ_SOURCE_MAX) {
+          throw new Error(`邮件体积 ${(hit.raw.length / 1048576).toFixed(1)}MB 超过 2MB 读取上限——附件请用 save_attachment`);
+        }
+        const parsed = await parseMail(hit.raw);
+        const env = cache.read(accountId, folder)?.items.find((e) => Number(e.uid) === uid) ?? envOfParsed(uid, parsed);
+        const view = buildReadView(uid, env, parsed);
+        readCacheSet(key, view);
+        return view;
+      }
+    }
     const { env, source } = await withConn(accountId, async (conn) => {
       const uids = await withTimeout('search', conn.search(folder, {}));
       const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
@@ -240,24 +279,26 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, opT
       return { env: hit, source: await withTimeout('source', conn.fetchSource(folder, uid)) };
     });
     const parsed = await parseMail(source);
-    const text = String(parsed.text || '');
-    const textTruncated = text.length > TEXT_TRUNCATE;
-    const htmlRaw = typeof parsed.html === 'string' && parsed.html.trim() !== '' ? parsed.html : null;
-    const htmlTruncated = htmlRaw != null && htmlRaw.length > TEXT_TRUNCATE;
-    const view = {
-      uid, subject: env.subject, from: env.from, to: env.to, date: env.date, seen: env.seen,
-      text: textTruncated ? text.slice(0, TEXT_TRUNCATE) + '\n…（已截断，全文 200KB 上限）' : text,
-      html: htmlTruncated ? htmlRaw.slice(0, TEXT_TRUNCATE) + '\n…（已截断，全文 200KB 上限）' : htmlRaw,
-      truncated: textTruncated || htmlTruncated,
-      attachments: (parsed.attachments || []).map((a) => ({
-        partId: a.partId, filename: a.filename, contentType: a.contentType, size: a.content ? a.content.length : 0,
-      })),
-    };
+    const view = buildReadView(uid, env, parsed);
+    if (archive) {
+      void archive.write(accountId, folder, uid, source, Date.parse(env.date) || 0).catch(() => undefined);
+    }
     readCacheSet(key, view);
     return view;
   }
 
   async function attachmentImpl(accountId, folder, uid, partId) {
+    if (archive) {
+      const hit = await archive.read(accountId, folder, uid);
+      if (hit && hit.raw.length <= ATTACH_MAX) {
+        const parsed = await parseMail(hit.raw);
+        const att = (parsed.attachments || []).find((a) => a.partId === partId);
+        if (att) {
+          if (att.content.length > ATTACH_MAX) throw new Error(`附件超过 10MB 上限（${att.filename}）`);
+          return { filename: att.filename, contentType: att.contentType, base64: att.content.toString('base64') };
+        }
+      }
+    }
     const source = await withConn(accountId, async (conn) => {
       const uids = await withTimeout('search', conn.search(folder, {}));
       const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
@@ -267,6 +308,9 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, opT
       }
       return withTimeout('source', conn.fetchSource(folder, uid));
     });
+    if (archive) {
+      void archive.write(accountId, folder, uid, source, 0).catch(() => undefined);
+    }
     const parsed = await parseMail(source);
     const att = (parsed.attachments || []).find((a) => a.partId === partId);
     if (!att) throw new Error(`附件不存在: partId=${partId}`);
@@ -289,6 +333,7 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, opT
     },
     async sentFolder(accountId) { return (await foldersImpl(accountId)).sent; },
     foldersPeek,
+    retentionCutoff,
     // 本地优先读取：不触 IMAP、忽略 TTL；无缓存返回空页。
     async envelopesPeek(accountId, folder, { page = 1, pageSize = 20 } = {}) {
       const size = Math.min(Math.max(Math.trunc(pageSize) || 20, 1), 50);
