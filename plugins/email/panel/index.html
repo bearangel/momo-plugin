@@ -41,6 +41,8 @@
   #account-form .box { background: var(--bg); border: 1px solid var(--bd); border-radius: 10px; padding: 16px; width: 380px; display: flex; flex-direction: column; gap: 8px; }
   #account-form label { font-size: 11px; color: var(--tx2); }
   .draft .ops { display: flex; gap: 8px; margin-top: 6px; }
+  #confirm-bar { position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); background: var(--bg); border: 1px solid var(--bd); border-radius: 8px; box-shadow: 0 4px 16px rgba(0,0,0,.2); padding: 10px 14px; display: none; align-items: center; gap: 12px; z-index: 30; max-width: 80%; }
+  #confirm-bar .msg { color: var(--tx); }
 </style>
 </head>
 <body>
@@ -50,7 +52,7 @@
   </div>
   <div class="col-mid">
     <div class="toolbar">
-      <input id="q" placeholder="搜索主题/发件人" style="flex:1" onkeydown="if(event.key==='Enter')reloadList()">
+      <input id="q" placeholder="搜索主题" style="flex:1" onkeydown="if(event.key==='Enter')reloadList()">
       <button onclick="reloadList(true)">刷新</button>
     </div>
     <div id="maillist" style="flex:1;overflow:auto"></div>
@@ -84,6 +86,12 @@
     </div>
   </div>
 
+  <div id="confirm-bar" style="display:none">
+    <span class="msg"></span>
+    <button class="ok">确认</button>
+    <button class="cancel">取消</button>
+  </div>
+
 <script>
   // PanelChannel 胶水（codegraph 同款协议）：postMessage '*' + rpc:result 回包 + ready 握手
   var seq = 0, pending = {};
@@ -113,9 +121,52 @@
     outlook: { ih: 'outlook.office365.com', ip: 993, it: 'tls', sh: 'smtp.office365.com', sp: 587, st: 'starttls' },
   };
   function $(id) { return document.getElementById(id); }
+  // 文本节点上下文转义
   function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
-  // onclick 内联属性的 JS 字符串实参转义（文件夹路径由 IMAP 服务端下发，须防引号截断）
-  function jsArg(s) { return "'" + String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/[\r\n]/g, ' ') + "'"; }
+  // 属性值上下文转义（& < > " ' 五类全覆盖——服务端下发的文本进属性须全转）
+  function attrEsc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+  // 列表/草稿类错误可见化：写入 #maillist 顶部红字 hint 行（不覆盖既有列表内容）
+  function showListError(msg) {
+    var box = $('maillist');
+    var line = document.createElement('p');
+    line.className = 'hint';
+    line.style.padding = '10px';
+    line.style.color = 'var(--err)';
+    line.textContent = String(msg == null ? '' : msg);
+    box.insertBefore(line, box.firstChild);
+  }
+  // 宿主面板 iframe 无 allow-modals：原生弹窗不可用——面板自绘确认条
+  var confirmPending = null;
+  function inlineConfirm(message) {
+    if (confirmPending) { var prev = confirmPending; confirmPending = null; prev(false); }
+    var bar = $('confirm-bar');
+    var msgEl = bar.querySelector('.msg');
+    var okBtn = bar.querySelector('.ok');
+    var cancelBtn = bar.querySelector('.cancel');
+    msgEl.textContent = String(message == null ? '' : message);
+    okBtn.onclick = null;
+    cancelBtn.onclick = null;
+    bar.style.display = 'flex';
+    return new Promise(function (resolve) {
+      function finish(v) {
+        bar.style.display = 'none';
+        okBtn.onclick = null;
+        cancelBtn.onclick = null;
+        if (confirmPending === resolve) confirmPending = null;
+        resolve(v);
+      }
+      confirmPending = resolve;
+      okBtn.onclick = function () { finish(true); };
+      cancelBtn.onclick = function () { finish(false); };
+    });
+  }
 
   // 主题跟随：ready 回包携 tokens（有则覆写 CSS 变量）
   function applyTheme(res) {
@@ -128,14 +179,14 @@
   function renderAccounts() {
     var h = '';
     S.accounts.forEach(function (a) {
-      h += '<div class="acc' + (a.id === S.accId ? ' on' : '') + '" onclick="pickAccount(' + jsArg(a.id) + ')">' +
-        '<span class="dot' + (a.health && a.health.state === 'error' ? ' err' : '') + '" title="' + esc(a.health && a.health.message || '') + '"></span>' + esc(a.displayName || a.email) +
+      h += '<div class="acc' + (a.id === S.accId ? ' on' : '') + '" data-acc="' + attrEsc(a.id) + '" onclick="pickAccount(this.dataset.acc)">' +
+        '<span class="dot' + (a.health && a.health.state === 'error' ? ' err' : '') + '" title="' + attrEsc(a.health && a.health.message || '') + '"></span>' + esc(a.displayName || a.email) +
         (a.health && a.health.state === 'error' ? ' <span class="hint">!</span>' : '') + '</div>';
       if (a.id === S.accId && S.folders) {
         var items = [{ p: 'INBOX', t: '收件箱' }, { p: S.folders.drafts, t: '草稿箱' }, { p: S.folders.sent, t: '已发送' }];
         items.forEach(function (it) {
           if (!it.p) return;
-          h += '<div class="folder' + (S.folder === it.p ? ' on' : '') + '" onclick="pickFolder(' + jsArg(it.p) + ')"><span>' + it.t + '</span></div>';
+          h += '<div class="folder' + (S.folder === it.p ? ' on' : '') + '" data-folder="' + attrEsc(it.p) + '" onclick="pickFolder(this.dataset.folder)"><span>' + it.t + '</span></div>';
         });
       }
     });
@@ -146,7 +197,8 @@
   function renderList() {
     var h = '';
     S.mails.forEach(function (m) {
-      h += '<div class="mail' + (!m.seen ? ' unread' : '') + (m.uid === S.selUid ? ' on' : '') + '" onclick="openMail(' + m.uid + ')">' +
+      var uid = Number(m.uid);
+      h += '<div class="mail' + (!m.seen ? ' unread' : '') + (uid === S.selUid ? ' on' : '') + '" data-uid="' + uid + '" onclick="openMail(Number(this.dataset.uid))">' +
         '<div class="subj">' + esc(m.subject || '(无主题)') + '</div>' +
         '<div class="meta"><span>' + esc(m.from) + '</span><span>' + (m.hasAttachments ? '<span class="att">附件 </span>' : '') + esc((m.date || '').slice(0, 16).replace('T', ' ')) + '</span></div></div>';
     });
@@ -156,16 +208,17 @@
 
   function renderDraftBox() {
     call('drafts.list').then(function (ds) {
-      var pendingDrafts = ds.filter(function (d) { return d.status === 'pending'; });
+      var pendingDrafts = (ds || []).filter(function (d) { return d.status === 'pending' && d.accountId === S.accId; });
       if (S.folder !== (S.folders && S.folders.drafts) || pendingDrafts.length === 0) return;
       var h = '<div style="padding:8px 10px;border-bottom:1px solid var(--bd)"><b>待确认草稿（' + pendingDrafts.length + '）</b></div>';
       pendingDrafts.forEach(function (d) {
         h += '<div class="mail draft" style="margin:0"><div class="subj">→ ' + esc((d.to || []).join(', ')) + '：' + esc(d.subject) + '</div>' +
           '<div class="meta"><span>' + esc(d.summary) + '</span></div>' +
-          '<div class="ops"><button class="pri" onclick="sendDraft(' + jsArg(d.id) + ')">发送</button><button onclick="discardDraft(' + jsArg(d.id) + ')">放弃</button></div></div>';
+          '<div class="ops"><button class="pri" data-draft="' + attrEsc(d.id) + '" onclick="sendDraft(this.dataset.draft)">发送</button>' +
+          '<button data-draft="' + attrEsc(d.id) + '" onclick="discardDraft(this.dataset.draft)">放弃</button></div></div>';
       });
       $('maillist').innerHTML = h + $('maillist').innerHTML;
-    }).catch(function () {});
+    }).catch(function (e) { showListError('草稿列表加载失败：' + e.message); });
   }
 
   function reloadList(force) {
@@ -175,10 +228,13 @@
     if (q) filter.subject = q;
     call(force ? 'mails.refresh' : 'mails.list', { accountId: S.accId, folder: S.folder, page: S.page, pageSize: S.pageSize, filter: filter })
       .then(function (p) { S.mails = p.items || []; S.total = p.total || 0; renderList(); if (!force) renderDraftBox(); })
-      .catch(function (e) { $('maillist').innerHTML = '<p class="hint" style="padding:10px;color:var(--err)">' + esc(e.message) + '</p>'; });
+      .catch(function (e) { showListError(e.message); });
   }
 
+  // HTML 邮件内层文档：禁远程资源（跟踪像素/外链字体/CSS）——sandbox="" 不拦这些，须靠 CSP
+  var MAIL_CSP = 'default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'';
   function openMail(uid) {
+    uid = Number(uid);
     S.selUid = uid;
     renderList();
     $('reader').innerHTML = '<p class="hint" style="padding:14px">读取中…</p>';
@@ -186,7 +242,8 @@
       var h = '<div class="hd"><div class="subj">' + esc(m.subject) + '</div>' +
         '<div class="m">发件人 ' + esc(m.from) + ' · ' + esc((m.date || '').replace('T', ' ').slice(0, 19)) + (m.truncated ? ' · <span style="color:var(--err)">正文已截断</span>' : '') + '</div></div>';
       if (m.html) {
-        h += '<iframe sandbox="" style="width:100%;height:60%;border:0" srcdoc="' + esc(m.html).replace(/"/g, '&quot;') + '"></iframe><p class="hint" style="padding:0 14px">HTML 邮件以全惰性 iframe 渲染（脚本/远程资源已禁用）</p>';
+        var doc = '<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="' + MAIL_CSP + '"><base target="_self"></head><body>' + m.html + '</body></html>';
+        h += '<iframe sandbox="" style="width:100%;height:60%;border:0" srcdoc="' + attrEsc(doc) + '"></iframe><p class="hint" style="padding:0 14px">HTML 邮件以全惰性 iframe 渲染（脚本/远程资源已禁用）</p>';
       } else {
         h += '<div class="body">' + esc(m.text) + '</div>';
       }
@@ -232,15 +289,28 @@
       .catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
   }
   function delAccount() {
-    if (!S.accId || !confirm('删除该邮箱账号？（本地配置与凭据，不动服务器）')) return;
-    call('accounts.delete', { id: S.accId }).then(function () { S.accId = null; boot(); }).catch(function (e) { alert(e.message); });
+    if (!S.accId) return;
+    inlineConfirm('删除该邮箱账号？（本地配置与凭据，不动服务器）').then(function (ok) {
+      if (!ok) return;
+      call('accounts.delete', { id: S.accId }).then(function () { S.accId = null; boot(); })
+        .catch(function (e) { showListError('删除账号失败：' + e.message); });
+    });
   }
 
   // —— 草稿操作（人工确认发送通道）——
-  function sendDraft(id) { if (!confirm('确认发送这封草稿？')) return; call('drafts.send', { draftId: id }).then(reloadList).catch(function (e) { alert('发送失败：' + e.message); reloadList(true); }); }
-  function discardDraft(id) { call('drafts.discard', { draftId: id }).then(reloadList).catch(function (e) { alert(e.message); }); }
+  function sendDraft(id) {
+    inlineConfirm('确认发送这封草稿？').then(function (ok) {
+      if (!ok) return;
+      call('drafts.send', { draftId: id }).then(reloadList)
+        .catch(function (e) { showListError('发送失败：' + e.message); reloadList(true); });
+    });
+  }
+  function discardDraft(id) {
+    call('drafts.discard', { draftId: id }).then(reloadList)
+      .catch(function (e) { showListError('放弃草稿失败：' + e.message); });
+  }
 
-  function pickAccount(id) { S.accId = id; S.folder = 'INBOX'; S.page = 1; call('folders.list', { accountId: id }).then(function (f) { S.folders = f; renderAccounts(); reloadList(); }); }
+  function pickAccount(id) { S.accId = id; S.folder = 'INBOX'; S.page = 1; call('folders.list', { accountId: id }).then(function (f) { S.folders = f; renderAccounts(); reloadList(); }).catch(function (e) { showListError('文件夹列表加载失败：' + e.message); }); }
   function pickFolder(p) { S.folder = p; S.page = 1; renderAccounts(); reloadList(); }
   function turnPage(d) { S.page = Math.max(1, S.page + d); reloadList(); }
 
@@ -251,7 +321,8 @@
     }).catch(function (e) { $('folders').innerHTML = '<p class="hint" style="padding:8px;color:var(--err)">' + esc(e.message) + '</p>'; });
   }
 
-  send('ready').then(function (res) { applyTheme(res && res.result ? res.result : res); boot(); setInterval(function () { if (S.accId) reloadList(); }, 60000); });
+  send('ready').then(function (res) { applyTheme(res && res.result ? res.result : res); boot(); setInterval(function () { if (S.accId) reloadList(); }, 60000); })
+    .catch(function (e) { $('folders').innerHTML = '<p class="hint" style="padding:8px;color:var(--err)">面板初始化失败：' + esc(e.message) + '</p>'; });
 </script>
 </body>
 </html>

@@ -36,4 +36,25 @@ describe.skipIf(!HOST_READY)('email panel', () => {
     // HTML 邮件渲染必须走嵌套沙箱 iframe（spec §8/§11）
     expect(html).toContain('sandbox=""');
   });
+
+  it('面板沙箱合规：无原生 confirm/alert，自绘确认条 + 属性注入面收口 + 邮件 CSP', () => {
+    const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
+    // C-1：宿主 iframe sandbox="allow-scripts" 无 allow-modals——window.confirm 恒 false、alert 静默丢
+    expect(html).not.toMatch(/\bwindow\.confirm\b/);
+    expect(html).not.toMatch(/\balert\s*\(/);
+    expect(html).toContain('id="confirm-bar"');
+    expect(html).toContain('inlineConfirm');
+    // C-2：服务端可控文本（health.message / 文件夹路径）进属性须转义；内联 handler 不得拼 JS 串
+    expect(html).toContain('attrEsc');
+    expect(html).toContain('data-acc');
+    expect(html).toContain('dataset.acc');
+    expect(html).toContain('data-folder');
+    expect(html).toContain('dataset.folder');
+    expect(html).toContain('data-uid');
+    expect(html).toContain('data-draft');
+    expect(html).toContain('dataset.draft');
+    // I-1：sandbox="" 不拦远程资源——HTML 邮件须自带 CSP 禁外链
+    expect(html).toContain('Content-Security-Policy');
+    expect(html).toContain('img-src data: cid:');
+  });
 });
