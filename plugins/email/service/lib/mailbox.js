@@ -67,7 +67,8 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
         const conn = await connOf(accountId);
         const uids = await withTimeout('search', conn.search(folder, crit));
         list = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
-        cache.write(accountId, folder, list);
+        // 仅无过滤全量才落缓存——带 filter 的直拉结果写入共享槽会污染 5min TTL 内的无 filter 查询（2026-11-05 修复）。
+        if (!hasFilter) cache.write(accountId, folder, list);
       } else {
         const cached = cache.read(accountId, folder);
         if (cached && Date.now() - cached.savedAt < CACHE_TTL_MS) {

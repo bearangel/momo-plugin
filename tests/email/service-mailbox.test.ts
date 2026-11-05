@@ -74,6 +74,14 @@ describe('mailbox', () => {
     expect(conn.calls.filter((c) => c === 'search')).toHaveLength(2);
   });
 
+  it('缓存污染防护：带 filter 直拉不落缓存，紧接无 filter 重新触网', async () => {
+    const conn = makeImap();
+    const mb = makeMailbox(conn);
+    await mb.envelopes('acc1', 'INBOX', { filter: { from: 'a@b.c' } });
+    await mb.envelopes('acc1', 'INBOX', {});
+    expect(conn.calls.filter((c) => c === 'search')).toHaveLength(2);
+  });
+
   it('filter 透传 search 条件；pageSize 钳制 ≤50', async () => {
     const conn = makeImap();
     const mb = makeMailbox(conn);
