@@ -144,6 +144,17 @@ describe('mailbox', () => {
     await expect(makeMailbox(hang).envelopes('acc1', 'INBOX', {})).rejects.toThrow('超时');
   });
 
+  it('folders 整链总预算：list 30ms + 3×status 20ms > 60ms → 整链超时（残留 1）', async () => {
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const slow = makeImap();
+    (slow as unknown as { list: unknown }).list = async () => {
+      await delay(30);
+      return [{ path: 'INBOX' }, { path: 'Drafts' }, { path: 'Sent' }];
+    };
+    (slow as unknown as { status: unknown }).status = async () => { await delay(20); return { unseen: 0 }; };
+    await expect(makeMailbox(slow).folders('acc1')).rejects.toThrow('超时');
+  });
+
   it('单次 service 调用总预算：两段各 40ms > 60ms → 整链超时（minor-1）', async () => {
     const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const slow = makeImap();

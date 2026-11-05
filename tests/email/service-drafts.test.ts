@@ -84,6 +84,22 @@ describe('drafts state machine', () => {
       .rejects.toThrow('25MB');
   });
 
+  it('save/send 整链总预算：APPEND 挂起 → 超时中文错误（残留 1）', async () => {
+    const drafts = createDrafts({
+      dataDir: dir,
+      totalTimeoutMs: 20,
+      renderMail: async () => Buffer.from('RAW'),
+      smtpSend: async () => {},
+      mailbox: {
+        draftsFolder: async () => 'Drafts',
+        sentFolder: async () => 'Sent',
+        append: () => new Promise(() => undefined),
+        deleteMessage: async () => {},
+      },
+    });
+    await expect(drafts.save(INPUT)).rejects.toThrow('超时');
+  });
+
   it('drafts.json 损坏 → list 空表不抛', async () => {
     fs.writeFileSync(path.join(dir, 'drafts.json'), '{broken', 'utf-8');
     const h = makeHarness();

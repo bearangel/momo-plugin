@@ -21,9 +21,17 @@ function toView(rec) {
   };
 }
 
-function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, mailbox }) {
+function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, mailbox, totalTimeoutMs = 8000 }) {
   const file = path.join(dataDir, 'drafts.json');
   const sending = new Set(); // I-2 in-flight 守卫：同一草稿 id 并发 send 拒绝
+  // save/send 整链（folder 解析 + APPEND/SMTP/删草稿）总预算：必须先于 callService 桥 10s 报中文错误。
+  const withTimeout = (label, p) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`草稿${label} 超时（${totalTimeoutMs}ms）`)), totalTimeoutMs);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
   const readAll = () => {
     try {
       const v = JSON.parse(fs.readFileSync(file, 'utf-8'));
@@ -47,35 +55,38 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
 
   return {
     async save(input) {
-      // input: { accountId, account, to: string[], cc: string[], subject, text, attachments: [{filename, contentType, data: Buffer}] }
-      const total = (input.attachments || []).reduce((n, a) => n + (a.data ? a.data.length : 0), 0);
-      if (total > ATTACH_TOTAL_MAX) throw new Error(`附件总量超过 25MB 上限（${total} 字节）`);
-      const mailInput = {
-        from: input.account.email, to: input.to, cc: input.cc || [],
-        subject: input.subject, text: input.text, attachments: input.attachments || [],
-      };
-      const raw = await renderMail(mailInput);
-      const folder = await mailbox.draftsFolder(input.accountId);
-      const uid = await mailbox.append(input.accountId, folder, raw);
-      const rec = {
-        id: 'draft_' + crypto.randomUUID(), accountId: input.accountId, uid, status: 'pending',
-        to: input.to, cc: input.cc || [], subject: input.subject, fromAddr: input.account.email,
-        summary: String(input.text || '').slice(0, 120),
-        attachmentNames: (input.attachments || []).map((a) => a.filename),
-        inputPayload: {
-          ...mailInput,
-          attachments: (input.attachments || []).map((a) => ({
-            filename: a.filename, contentType: a.contentType, dataBase64: a.data.toString('base64'),
-          })),
-        },
-        createdAt: now().toISOString(), sentAt: null, lastError: null,
-      };
-      writeAll([...readAll(), rec]);
-      return toView(rec);
+      return withTimeout('保存', (async () => {
+        // input: { accountId, account, to: string[], cc: string[], subject, text, attachments: [{filename, contentType, data: Buffer}] }
+        const total = (input.attachments || []).reduce((n, a) => n + (a.data ? a.data.length : 0), 0);
+        if (total > ATTACH_TOTAL_MAX) throw new Error(`附件总量超过 25MB 上限（${total} 字节）`);
+        const mailInput = {
+          from: input.account.email, to: input.to, cc: input.cc || [],
+          subject: input.subject, text: input.text, attachments: input.attachments || [],
+        };
+        const raw = await renderMail(mailInput);
+        const folder = await mailbox.draftsFolder(input.accountId);
+        const uid = await mailbox.append(input.accountId, folder, raw);
+        const rec = {
+          id: 'draft_' + crypto.randomUUID(), accountId: input.accountId, uid, status: 'pending',
+          to: input.to, cc: input.cc || [], subject: input.subject, fromAddr: input.account.email,
+          summary: String(input.text || '').slice(0, 120),
+          attachmentNames: (input.attachments || []).map((a) => a.filename),
+          inputPayload: {
+            ...mailInput,
+            attachments: (input.attachments || []).map((a) => ({
+              filename: a.filename, contentType: a.contentType, dataBase64: a.data.toString('base64'),
+            })),
+          },
+          createdAt: now().toISOString(), sentAt: null, lastError: null,
+        };
+        writeAll([...readAll(), rec]);
+        return toView(rec);
+      })());
     },
     async list() { await this.sweep(); return readAll().map(toView); },
     async get(id) { return readAll().find((r) => r.id === id) || null; },
     async send(id) {
+      return withTimeout('发送', (async () => {
       if (sending.has(id)) throw new Error('草稿正在发送中'); // I-2
       const rec = readAll().find((r) => r.id === id);
       if (!rec) throw new Error(`草稿不存在: ${id}`);
@@ -119,6 +130,7 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
       } finally {
         sending.delete(id);
       }
+      })());
     },
     async discard(id) {
       const rec = readAll().find((r) => r.id === id);

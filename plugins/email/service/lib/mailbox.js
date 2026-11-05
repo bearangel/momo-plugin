@@ -57,9 +57,11 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     const sent = raw.find((f) => f.specialUse === '\\Sent')?.path
       ?? raw.find((f) => SENT_NAMES.includes(norm(f.path)))?.path ?? null;
     const paths = [...new Set(['INBOX', drafts, sent].filter(Boolean))];
-    const stats = await Promise.all(paths.map((p) => withTimeout('status', conn.status(p))));
     const unseen = {};
-    paths.forEach((p, i) => { unseen[p] = Number(stats[i]?.unseen ?? 0); });
+    for (const p of paths) {
+      const st = await withTimeout('status', conn.status(p));
+      unseen[p] = Number(st?.unseen ?? 0);
+    }
     return { all: raw, drafts, sent, unseen };
   }
 
@@ -148,7 +150,8 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
 
   return {
     CACHE_TTL_MS,
-    folders: foldersImpl,
+    // list + 3×status 在同一连接上串行（≈4 RTT），整链同样受单次调用总预算约束。
+    folders: (accountId) => withTimeout('文件夹列表', foldersImpl(accountId)),
     async draftsFolder(accountId) { return (await foldersImpl(accountId)).drafts ?? 'INBOX'; },
     async sentFolder(accountId) { return (await foldersImpl(accountId)).sent ?? 'INBOX'; },
     // 单次 service 调用总预算：整条链（选箱/search/fetch/parse）受 opTimeoutMs 约束，内部单操作超时保留。
