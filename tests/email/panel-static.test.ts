@@ -40,6 +40,19 @@ describe.skipIf(!HOST_READY)('email panel', () => {
     expect(html).toContain('testOk');
   });
 
+  it('阅读器填满高度 + 远程图片开关（默认屏蔽可放行）', () => {
+    const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
+    for (const anchor of [
+      'mail-tools', '显示远程图片', '远程图片已屏蔽',
+      'img-src data: cid:', 'https: http:', 'flex:1',
+      'sandbox=""', 'Content-Security-Policy',
+    ]) {
+      expect(html).toContain(anchor);
+    }
+    expect(html).not.toMatch(/\bconfirm\s*\(/);
+    expect(html).not.toMatch(/\balert\s*\(/);
+  });
+
   it('面板沙箱合规：无原生 confirm/alert，自绘确认条 + 属性注入面收口 + 邮件 CSP', () => {
     const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
     // C-1：宿主 iframe sandbox="allow-scripts" 无 allow-modals——window.confirm 恒 false、alert 静默丢

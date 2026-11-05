@@ -9,7 +9,9 @@
   body { font: 12.5px/1.6 -apple-system, 'PingFang SC', sans-serif; height: 100vh; display: flex; color: var(--tx); background: var(--bg); }
   .col-left { width: 200px; border-right: 1px solid var(--bd); overflow: auto; padding: 8px; flex-shrink: 0; }
   .col-mid { width: 320px; border-right: 1px solid var(--bd); display: flex; flex-direction: column; flex-shrink: 0; }
-  .col-right { flex: 1; overflow: auto; }
+  .col-right { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  #reader { flex: 1; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+  .mail-tools { display: flex; gap: 8px; align-items: center; padding: 6px 14px; border-bottom: 1px solid var(--bd); color: var(--tx3); font-size: 11px; }
   .acc { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 6px; }
   .acc:hover, .acc.on { background: var(--s2); }
   .acc .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
@@ -113,7 +115,7 @@
   function call(method, params) { return send('plugin:callService', { method: method, params: params || {} }); }
 
   // 状态
-  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false };
+  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null };
   var PRESETS = {
     qq: { ih: 'imap.qq.com', ip: 993, it: 'tls', sh: 'smtp.qq.com', sp: 465, st: 'tls' },
     '163': { ih: 'imap.163.com', ip: 993, it: 'tls', sh: 'smtp.163.com', sp: 465, st: 'tls' },
@@ -238,30 +240,45 @@
       .catch(function (e) { showListError(e.message); });
   }
 
-  // HTML 邮件内层文档：禁远程资源（跟踪像素/外链字体/CSS）——sandbox="" 不拦这些，须靠 CSP
-  var MAIL_CSP = 'default-src \'none\'; img-src data: cid:; style-src \'unsafe-inline\'';
+  // HTML 邮件内层文档：默认禁远程资源（跟踪像素/外链字体/CSS）；用户可一键放行图片。
+  // 脚本仍由 sandbox="" 禁用（安全底线），CSP 只负责资源加载面。
+  function mailCsp(allowRemote) {
+    return 'default-src \'none\'; img-src data: cid:' + (allowRemote ? ' https: http:' : '') + '; style-src \'unsafe-inline\'';
+  }
+  function toggleRemoteImages() {
+    S.showRemoteImages = !S.showRemoteImages;
+    if (S.curMail) renderMail(S.curMail);
+  }
+  function renderMail(m) {
+    var h = '<div class="hd"><div class="subj">' + esc(m.subject) + '</div>' +
+      '<div class="m">发件人 ' + esc(m.from) + ' · ' + esc((m.date || '').replace('T', ' ').slice(0, 19)) + (m.truncated ? ' · <span style="color:var(--err)">正文已截断</span>' : '') + '</div></div>';
+    if (m.html) {
+      var tools = '<div class="mail-tools"><span>' + (S.showRemoteImages ? '已允许远程图片' : '远程图片已屏蔽（防跟踪）') + '</span>' +
+        '<button style="padding:2px 8px" onclick="toggleRemoteImages()">' + (S.showRemoteImages ? '屏蔽远程图片' : '显示远程图片') + '</button></div>';
+      // 组装 srcdoc 前剥离 meta refresh：自导航不落 CSP 管辖，仍可触发跟踪请求
+      var safeHtml = String(m.html || '').replace(/<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
+      var doc = '<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="' + mailCsp(S.showRemoteImages) + '"><base target="_self"></head><body>' + safeHtml + '</body></html>';
+      h += tools + '<iframe sandbox="" style="width:100%;flex:1;min-height:280px;border:0;background:#fff" srcdoc="' + attrEsc(doc) + '"></iframe>';
+    } else {
+      h += '<div class="body">' + esc(m.text) + '</div>';
+    }
+    if (m.attachments && m.attachments.length) {
+      h += '<div class="hd"><b>附件</b>（保存到工作区请在会话中让邮件助手处理）</div><div style="padding:0 14px 14px">';
+      m.attachments.forEach(function (a) { h += '<div class="att-row">[附件] ' + esc(a.filename) + ' <span class="hint">' + Math.ceil((a.size || 0) / 1024) + ' KB</span></div>'; });
+      h += '</div>';
+    }
+    $('reader').innerHTML = h;
+  }
   function openMail(uid) {
     uid = Number(uid);
     S.selUid = uid;
+    S.showRemoteImages = false;
+    S.curMail = null;
     renderList();
     $('reader').innerHTML = '<p class="hint" style="padding:14px">读取中…</p>';
     call('mails.get', { accountId: S.accId, folder: S.folder, uid: uid }).then(function (m) {
-      var h = '<div class="hd"><div class="subj">' + esc(m.subject) + '</div>' +
-        '<div class="m">发件人 ' + esc(m.from) + ' · ' + esc((m.date || '').replace('T', ' ').slice(0, 19)) + (m.truncated ? ' · <span style="color:var(--err)">正文已截断</span>' : '') + '</div></div>';
-      if (m.html) {
-        // 组装 srcdoc 前剥离 meta refresh：自导航不落 CSP 管辖，仍可触发跟踪请求
-        var safeHtml = String(m.html || '').replace(/<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
-        var doc = '<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="' + MAIL_CSP + '"><base target="_self"></head><body>' + safeHtml + '</body></html>';
-        h += '<iframe sandbox="" style="width:100%;height:60%;border:0" srcdoc="' + attrEsc(doc) + '"></iframe><p class="hint" style="padding:0 14px">HTML 邮件以全惰性 iframe 渲染（脚本/远程资源已禁用）</p>';
-      } else {
-        h += '<div class="body">' + esc(m.text) + '</div>';
-      }
-      if (m.attachments && m.attachments.length) {
-        h += '<div class="hd"><b>附件</b>（保存到工作区请在会话中让邮件助手处理）</div><div style="padding:0 14px 14px">';
-        m.attachments.forEach(function (a) { h += '<div class="att-row">[附件] ' + esc(a.filename) + ' <span class="hint">' + Math.ceil((a.size || 0) / 1024) + ' KB</span></div>'; });
-        h += '</div>';
-      }
-      $('reader').innerHTML = h;
+      S.curMail = m;
+      renderMail(m);
     }).catch(function (e) { $('reader').innerHTML = '<p class="hint" style="padding:14px;color:var(--err)">' + esc(e.message) + '</p>'; });
   }
 
