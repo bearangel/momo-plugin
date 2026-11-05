@@ -89,4 +89,15 @@ describe('service index', () => {
     const sent = await svc.handle('drafts.send', { draftId: d.id });
     expect(sent.status).toBe('sent');
   });
+
+  it('drafts.save __first__ 哨兵：无账号拒绝，有账号回退首账号', async () => {
+    const svc = buildService(makeDeps());
+    await expect(svc.handle('drafts.save', { accountId: '__first__', to: 'x@y.z', subject: 'S', text: 'T' }))
+      .rejects.toThrow('尚未配置邮箱账号');
+    await svc.handle('accounts.add', ACC_INPUT);
+    const firstId = (await svc.handle('accounts.list', {}))[0].id;
+    const d = await svc.handle('drafts.save', { accountId: '__first__', to: 'x@y.z', subject: 'S', text: 'T' });
+    expect(d.status).toBe('pending');
+    expect((await svc.handle('drafts.list', {}))[0].accountId).toBe(firstId);
+  });
 });

@@ -113,10 +113,17 @@ function buildService(deps) {
     'mails.get': (p) => mailbox.read(p.accountId, p.folder, p.uid),
     'attachments.get': (p) => mailbox.attachment(p.accountId, p.folder, p.uid, p.partId),
     'drafts.save': async (p) => {
-      const account = await accountStore.get(p.accountId);
-      if (!account) throw new Error(`账号不存在: ${p.accountId}`);
+      // '__first__' = 工具侧首账号回退哨兵（draft_mail 未指定 accountId 时）
+      let accountId = p.accountId;
+      if (accountId === '__first__') {
+        const first = (await accountStore.list())[0];
+        if (!first) throw new Error('尚未配置邮箱账号');
+        accountId = first.id;
+      }
+      const account = await accountStore.get(accountId);
+      if (!account) throw new Error(`账号不存在: ${accountId}`);
       return drafts.save({
-        accountId: p.accountId, account,
+        accountId, account,
         to: Array.isArray(p.to) ? p.to : (typeof p.to === 'string' ? [p.to] : []),
         cc: Array.isArray(p.cc) ? p.cc : [],
         subject: String(p.subject || ''), text: String(p.text || ''),
