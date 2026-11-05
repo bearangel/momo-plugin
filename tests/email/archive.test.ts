@@ -186,3 +186,42 @@ describe('prune 按 folder 限定（发件箱永久，spec §1.1/§9）', () => 
     expect(await arc.read('acc1', 'Sent Messages', 1)).not.toBeNull();
   });
 });
+
+describe('主密钥丢失防护（spec §6.1：禁用+提示，不静默重建、不删文件）', () => {
+  it('钥匙串条目丢失且存在 ok 行 → read 抛中文错误且文件保留；write 降级不落盘', async () => {
+    const arc = mk();
+    await arc.setRoot(root);
+    await arc.write('acc1', 'INBOX', 1, Buffer.from('keep me'), Date.now());
+    secretBox.clear();
+    const arc2 = createArchive({ dataDir, store, secrets: fakeSecrets, logger });
+    const row = store.getArchiveRow('acc1', 'INBOX', 1)!;
+    const abs = path.join(root, row.relPath);
+    await expect(arc2.read('acc1', 'INBOX', 1)).rejects.toThrow(/主密钥丢失/);
+    expect(fs.existsSync(abs)).toBe(true);
+    expect(store.getArchiveRow('acc1', 'INBOX', 1)!.state).toBe('ok');
+    const w = await arc2.write('acc1', 'INBOX', 2, Buffer.from('x'), Date.now());
+    expect(w.stored).toBe(false);
+    expect(w.error).toMatch(/主密钥丢失/);
+  });
+
+  it('钥匙串瞬时故障（get 抛错）→ read 抛错且不删文件（与认证失败区分）', async () => {
+    const arc = mk();
+    await arc.setRoot(root);
+    await arc.write('acc1', 'INBOX', 1, Buffer.from('keep'), Date.now());
+    const row = store.getArchiveRow('acc1', 'INBOX', 1)!;
+    const abs = path.join(root, row.relPath);
+    const brokenSecrets = { ...fakeSecrets, get: async () => { throw new Error('keytar 抖动'); } };
+    const arc2 = createArchive({ dataDir, store, secrets: brokenSecrets, logger });
+    await expect(arc2.read('acc1', 'INBOX', 1)).rejects.toThrow(/keytar|主密钥/);
+    expect(fs.existsSync(abs)).toBe(true);
+    expect(store.getArchiveRow('acc1', 'INBOX', 1)!.state).toBe('ok');
+  });
+
+  it('首次启用（无 ok 行）→ 仍可 bootstrap 生成密钥', async () => {
+    const arc = mk();
+    await arc.setRoot(root);
+    secretBox.clear();
+    const w = await arc.write('acc1', 'INBOX', 1, Buffer.from('first'), Date.now());
+    expect(w.stored).toBe(true);
+  });
+});

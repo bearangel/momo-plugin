@@ -467,7 +467,7 @@
   function chooseStorageDir() {
     $('st-stats').className = 'status';
     $('st-stats').textContent = '请在系统对话框中选择目录…';
-    send('app:pickDirectory', { title: '选择邮件存储目录' }).then(function (p) {
+    send('app:pickDirectory', { opts: { title: '选择邮件存储目录' } }).then(function (p) {
       if (!p) { $('st-stats').textContent = ''; return; }
       call('archive.setRoot', { path: p }).then(function () { toast('存储目录已更新'); openStorage(); })
         .catch(function (e) { $('st-stats').className = 'status err'; $('st-stats').textContent = e.message; });

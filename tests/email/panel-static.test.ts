@@ -92,7 +92,8 @@ describe('面板存储设置区（2026-11-05 归档 spec §10）', () => {
     const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
     expect(html).toContain('存储…');
     expect(html).toContain('id="st-path"');
-    expect(html).toContain("send('app:pickDirectory'");
+    expect(html).toContain("send('app:pickDirectory', { opts:");
+    expect(html).not.toMatch(/send\('app:pickDirectory',\s*\{\s*title/);
     expect(html).toContain('archive.getSettings');
     expect(html).toContain('archive.setRoot');
     expect(html).toContain('archive.clear');

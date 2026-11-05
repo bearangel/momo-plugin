@@ -39,6 +39,11 @@ function createArchive({ dataDir, store, secrets, logger, now = () => new Date()
       if (masterKey.length !== 32) throw new Error('归档主密钥长度非法（请清空本地库后重试）');
       return masterKey;
     }
+    // spec §6.1：已有 ok 归档而钥匙串无密钥 = 密钥丢失——禁用并提示，绝不静默重建
+    //（重建会让全部旧文件被判 corrupt 删除）。首次启用（无 ok 行）才允许 bootstrap。
+    if (store.hasArchiveOkRows()) {
+      throw new Error('归档主密钥丢失，本地归档已禁用（请在面板清空本地库后重新选择目录启用）');
+    }
     masterKey = generateMasterKey();
     await secrets.set(KEY_NAME, masterKey.toString('base64'));
     return masterKey;
@@ -96,8 +101,10 @@ function createArchive({ dataDir, store, secrets, logger, now = () => new Date()
       store.setArchiveState(accountId, folder, uid, 'missing');
       return null;
     }
+    // 密钥获取在认证 try 之外：钥匙串丢失/瞬时故障不得与「文件被篡改」混同而删文件
+    const key = await ensureMasterKey();
     try {
-      return { raw: open(sealed, await ensureMasterKey(), aadOf(accountId, folder, uid)) };
+      return { raw: open(sealed, key, aadOf(accountId, folder, uid)) };
     } catch {
       try { fs.unlinkSync(abs); } catch { /* 删失败由 verifyStartup 兜底 */ }
       store.setArchiveState(accountId, folder, uid, 'corrupt');

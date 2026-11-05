@@ -286,6 +286,9 @@ function createStore({ dataDir }) {
       if (opts.folder) { sql += ' AND folder = ?'; args.push(opts.folder); }
       return db.prepare(sql).all(...args).map(rowToArchive);
     },
+    hasArchiveOkRows() {
+      return db.prepare("SELECT 1 FROM local_archive WHERE state = 'ok' LIMIT 1").get() != null;
+    },
     archiveAccountsOfRoot(rootId) {
       return db.prepare('SELECT DISTINCT account_id AS id FROM local_archive WHERE root_id = ?').all(rootId)
         .map((r) => String(r.id));
