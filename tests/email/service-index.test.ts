@@ -420,3 +420,41 @@ describe('archiveRoot 配置对账 + config.get（2026-11-05 配置迁移）', (
     expect(effectiveArchiveRoot({}, { homeDir: home, disableDefault: true })).toBeNull();
   });
 });
+
+describe('createService 宿主入口装配（配置迁移布线回归锁）', () => {
+  it('空配置 → 默认目录自动创建并启用；显式 archiveRoot 优先；kill-switch 关闭', async () => {
+    const mod = (await import('../../plugins/email/service/index')) as {
+      createService: (ctx: unknown, overrides?: { homeDir?: string; disableDefault?: boolean }) => {
+        start(): Promise<void>; stop(): Promise<void>;
+        handle(m: string, p: unknown): Promise<unknown>;
+      };
+    };
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-host-home-'));
+    const mk = (cfg: Record<string, unknown>, over: { homeDir?: string; disableDefault?: boolean } = {}) =>
+      mod.createService({
+        getDataDir: () => fs.mkdtempSync(path.join(os.tmpdir(), 'arc-host-data-')),
+        getConfig: () => cfg,
+        secrets: { get: async () => null, set: async () => {}, delete: async () => {} },
+        logger: { info() {}, warn() {}, error() {} },
+      }, { homeDir: home, ...over });
+    const svc = mk({});
+    await svc.start();
+    const st = await svc.handle('archive.getSettings', {});
+    expect(st.enabled).toBe(true);
+    expect(st.rootPath).toBe(fs.realpathSync(path.join(home, '.momo-plugin', 'email')));
+    await svc.stop();
+
+    const rootB = fs.mkdtempSync(path.join(os.tmpdir(), 'arc-host-b-'));
+    const svc2 = mk({ archiveRoot: rootB });
+    await svc2.start();
+    expect((await svc2.handle('archive.getSettings', {})).rootPath).toBe(fs.realpathSync(rootB));
+    await svc2.stop();
+
+    const svc3 = mk({}, { disableDefault: true });
+    await svc3.start();
+    expect((await svc3.handle('archive.getSettings', {})).enabled).toBe(false);
+    await svc3.stop();
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(rootB, { recursive: true, force: true });
+  });
+});

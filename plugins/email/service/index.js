@@ -308,12 +308,21 @@ function buildService(deps) {
   };
 }
 
-/** 宿主入口（service-manager createRequire 装载） */
-module.exports.createService = function createService(ctx) {
+/** 宿主入口（service-manager createRequire 装载）。overrides 仅供测试注入（homeDir/disableDefault） */
+module.exports.createService = function createService(ctx, overrides = {}) {
+  const cfg = ctx.getConfig() ?? {};
+  const isDefaultRoot = !String(cfg.archiveRoot || '').trim();
+  const archiveRoot = effectiveArchiveRoot(cfg, {
+    homeDir: overrides.homeDir ?? os.homedir(),
+    disableDefault: overrides.disableDefault ?? process.env.MOMO_EMAIL_ARCHIVE_DISABLE_DEFAULT === '1',
+  });
   const svc = buildService({
     dataDir: ctx.getDataDir(),
     secrets: ctx.secrets,
     logger: ctx.logger,
+    config: () => ctx.getConfig(),
+    archiveRoot,
+    archiveRootCreate: archiveRoot != null && isDefaultRoot,
     imapflow: vendor('imapflow').ImapFlow,
     nodemailerLib: vendor('nodemailer'),
     mailparserLib: vendor('mailparser'),
