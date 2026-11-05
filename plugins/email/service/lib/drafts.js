@@ -1,8 +1,6 @@
-// 草稿状态机：pending → sent | discarded（24h 过期）。真相链 = IMAP 目录 + drafts.json 登记。
+// 草稿状态机：pending → sent | discarded（24h 过期）。真相链 = IMAP 目录 + sqlite drafts 登记。
 // send 仅接受已存在草稿 id；收件人在起草时定型，envelope 透传自登记条目（门禁纵深 1）。
 'use strict';
-const fs = require('node:fs');
-const path = require('node:path');
 const crypto = require('node:crypto');
 
 const EXPIRE_MS = 24 * 3600 * 1000;
@@ -26,8 +24,7 @@ function toView(rec) {
 const DELETE_WARNING = '已发送，但草稿箱副本未能删除';
 const ARCHIVE_WARNING = '已发送，但未能归档到「已发送」文件夹（部分服务商会自动归档）';
 
-function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, mailbox, totalTimeoutMs = 8000 }) {
-  const file = path.join(dataDir, 'drafts.json');
+function createDrafts({ store, cache, now = () => new Date(), renderMail, smtpSend, mailbox, totalTimeoutMs = 8000 }) {
   const sending = new Set(); // I-2 in-flight 守卫：同一草稿 id 并发 send 拒绝
   // save/send 整链（folder 解析 + APPEND/SMTP/删草稿）总预算：必须先于 callService 桥 10s 报中文错误。
   const withTimeout = (label, p) => new Promise((resolve, reject) => {
@@ -37,18 +34,7 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
       (e) => { clearTimeout(timer); reject(e); },
     );
   });
-  const readAll = () => {
-    try {
-      const v = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      return Array.isArray(v) ? v : [];
-    } catch { return []; }
-  };
-  const writeAll = (rows) => {
-    fs.mkdirSync(dataDir, { recursive: true });
-    const tmp = file + '.tmp-' + process.pid + '-' + Date.now();
-    fs.writeFileSync(tmp, JSON.stringify(rows, null, 2), 'utf-8');
-    fs.renameSync(tmp, file);
-  };
+  const readAll = () => store.listDrafts();
   // uid 缺失（APPEND 无 uid）时按草稿标记反查；反查失败不阻断主流程，返回 0 让调用方告警。
   const resolveUid = async (accountId, folder, draftId) => {
     if (typeof mailbox.resolveAppendedUid !== 'function') return 0;
@@ -59,12 +45,11 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
     }
   };
   const patch = (id, fn) => {
-    const rows = readAll();
-    const i = rows.findIndex((r) => r.id === id);
-    if (i < 0) throw new Error(`草稿不存在: ${id}`);
-    rows[i] = fn(rows[i]);
-    writeAll(rows);
-    return rows[i];
+    const rec = store.getDraft(id);
+    if (!rec) throw new Error(`草稿不存在: ${id}`);
+    const next = fn(rec);
+    store.updateDraft(id, next);
+    return next;
   };
 
   return {
@@ -96,12 +81,12 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
           },
           createdAt: now().toISOString(), sentAt: null, lastError: null,
         };
-        writeAll([...readAll(), rec]);
+        store.insertDraft(rec);
         return toView(rec);
       })());
     },
     async list() { await this.sweep(); return readAll().map(toView); },
-    async get(id) { return readAll().find((r) => r.id === id) || null; },
+    async get(id) { return store.getDraft(id); },
     async send(id) {
       return withTimeout('发送', (async () => {
       if (sending.has(id)) throw new Error('草稿正在发送中'); // I-2
@@ -159,10 +144,12 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
           deleteWarning = DELETE_WARNING;
         }
         try {
-          return toView(patch(id, (r) => ({
+          const view = toView(patch(id, (r) => ({
             ...r, status: 'sent', sentAt: now().toISOString(), lastError: null,
             archiveWarning, deleteWarning,
           })));
+          try { if (sent) cache?.invalidate?.(rec.accountId, sent); } catch { /* 失效失败不影响发送结果 */ }
+          return view;
         } catch (err) {
           const msg = String((err && err.message) || err);
           throw new Error(`发送已完成但登记失败: ${msg}（请勿重发，可在面板核对）`);
@@ -177,8 +164,8 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
       if (!rec) return;
       if (rec.status === 'sent') return; // M-1 终态不可越：已发送记录不删信不再改状态
       let deleteWarning = null;
+      let folder = null;
       if (rec.status === 'pending') {
-        let folder = null;
         try {
           folder = await mailbox.draftsFolder(rec.accountId);
         } catch {
@@ -199,19 +186,15 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
         }
       }
       patch(id, (r) => ({ ...r, status: 'discarded', ...(deleteWarning ? { deleteWarning } : {}) }));
+      try { if (folder) cache?.invalidate?.(rec.accountId, folder); } catch { /* 失效失败不影响放弃结果 */ }
     },
     async sweep() {
       const cutoff = now().getTime() - EXPIRE_MS;
-      const rows = readAll();
-      let dirty = false;
-      for (const r of rows) {
+      for (const r of readAll()) {
         if (r.status === 'pending' && Date.parse(r.createdAt) < cutoff) {
-          r.status = 'discarded';
-          r.expireReason = '24h 未确认自动作废';
-          dirty = true;
+          store.updateDraft(r.id, { ...r, status: 'discarded', expireReason: '24h 未确认自动作废' });
         }
       }
-      if (dirty) writeAll(rows);
     },
   };
 }

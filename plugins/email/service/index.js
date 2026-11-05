@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { createAccountStore } = require('./lib/accounts');
+const { createStore } = require('./lib/store');
 const { createEnvelopeCache } = require('./lib/envelope-cache');
 const { createMailbox } = require('./lib/mailbox');
 const { createDrafts } = require('./lib/drafts');
@@ -104,7 +105,8 @@ function buildService(deps) {
   const smtpTimeoutMs = deps.smtpTimeoutMs ?? 8000;
   fs.mkdirSync(dataDir, { recursive: true });
   const accountStore = createAccountStore({ dataDir, secrets });
-  const cache = createEnvelopeCache({ dataDir });
+  const store = createStore({ dataDir });
+  const cache = createEnvelopeCache({ store });
   const imapConnect = deps.imapConnect ?? imapAdapterFor(deps.imapflow);
   const parseMail = deps.parseMail ?? ((src) => deps.mailparserLib.simpleParser(src));
   // 桥超时对齐：宿主 callService 桥 requestPluginCallService 超时 10s
@@ -136,7 +138,7 @@ function buildService(deps) {
     const pw = await accountStore.getPassword(accountId);
     await smtpGuard('发送', smtpTransportOf(deps.nodemailerLib, acc, pw).sendMail({ raw, envelope }));
   };
-  const drafts = createDrafts({ dataDir, renderMail, smtpSend, mailbox });
+  const drafts = createDrafts({ store, cache, renderMail, smtpSend, mailbox });
 
   const ROUTES = {
     'accounts.list': () => accountStore.list(),
@@ -220,7 +222,10 @@ function buildService(deps) {
 
   return {
     async start() { await drafts.sweep(); logger.info?.('email service started'); },
-    async stop() { await mailbox.closeAll(); },
+    async stop() {
+      await mailbox.closeAll();
+      store.close();
+    },
     async handle(method, params) {
       const fn = ROUTES[method];
       if (!fn) throw new Error(`未知方法: ${method}`);

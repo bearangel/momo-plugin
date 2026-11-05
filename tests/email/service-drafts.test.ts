@@ -5,10 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { createDrafts } from '../../plugins/email/service/lib/drafts';
+import { createStore } from '../../plugins/email/service/lib/store';
 
 let dir: string;
-beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-drafts-')); });
-afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
+let stores: Array<{ close(): void }> = [];
+beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-drafts-')); stores = []; });
+afterEach(() => {
+  for (const st of stores) { try { st.close(); } catch { /* 已关闭 */ } }
+  fs.rmSync(dir, { recursive: true, force: true });
+});
 
 function makeHarness(over: {
   smtpSend?: (accId: string, raw: Buffer, envelope: unknown) => Promise<void>;
@@ -16,12 +21,16 @@ function makeHarness(over: {
   resolveAppendedUid?: (accId: string, folder: string, draftId: string) => Promise<number>;
   sentFolder?: () => Promise<string | null>;
   draftsFolder?: () => Promise<string>;
+  afterSmtp?: (store: { deleteDrafts(ids: string[]): void }) => void;
 } = {}) {
   const appended: Array<{ folder: string; raw: Buffer }> = [];
   const deleted: Array<{ folder: string; uid: number }> = [];
+  const invalidated: Array<[string, string]> = [];
   const renderInputs: Array<{ subject: string; extraHeaders?: Record<string, string> }> = [];
   let sentEnv: unknown = null;
   let sentRaw: Buffer | null = null;
+  const store = createStore({ dataDir: dir });
+  stores.push(store);
   const mailbox = {
     draftsFolder: over.draftsFolder ?? (async () => 'Drafts'),
     sentFolder: over.sentFolder ?? (async () => 'Sent'),
@@ -31,16 +40,21 @@ function makeHarness(over: {
   };
   let nowMs = Date.parse('2026-11-05T10:00:00Z');
   const drafts = createDrafts({
-    dataDir: dir,
+    store,
+    cache: { invalidate: (a: string, f: string) => invalidated.push([a, f]) },
     now: () => new Date(nowMs),
     renderMail: async (i: { subject: string; extraHeaders?: Record<string, string> }) => {
       renderInputs.push(i);
       return Buffer.from(`RAW:${i.subject}`);
     },
-    smtpSend: over.smtpSend ?? (async (_accId: string, raw: Buffer, envelope: unknown) => { sentRaw = raw; sentEnv = envelope; }),
+    smtpSend: async (accId: string, raw: Buffer, envelope: unknown) => {
+      if (over.smtpSend) await over.smtpSend(accId, raw, envelope);
+      else { sentRaw = raw; sentEnv = envelope; }
+      if (over.afterSmtp) over.afterSmtp(store);
+    },
     mailbox,
   });
-  return { drafts, appended, deleted, renderInputs, sentEnv: () => sentEnv, sentRaw: () => sentRaw, setNow: (ms: number) => { nowMs = ms; } };
+  return { drafts, appended, deleted, invalidated, renderInputs, store, sentEnv: () => sentEnv, sentRaw: () => sentRaw, setNow: (ms: number) => { nowMs = ms; } };
 }
 
 const ACCOUNT = { id: 'acc1', email: 'me@qq.com' };
@@ -168,8 +182,10 @@ describe('drafts state machine', () => {
   });
 
   it('save/send 整链总预算：APPEND 挂起 → 超时中文错误（残留 1）', async () => {
+    const store = createStore({ dataDir: dir });
+    stores.push(store);
     const drafts = createDrafts({
-      dataDir: dir,
+      store,
       totalTimeoutMs: 20,
       renderMail: async () => Buffer.from('RAW'),
       smtpSend: async () => {},
@@ -183,10 +199,31 @@ describe('drafts state machine', () => {
     await expect(drafts.save(INPUT)).rejects.toThrow('超时');
   });
 
-  it('drafts.json 损坏 → list 空表不抛', async () => {
-    fs.writeFileSync(path.join(dir, 'drafts.json'), '{broken', 'utf-8');
+  it('DB 损坏 → createStore 抛中文错误（替代旧 JSON 损坏用例）', () => {
+    fs.writeFileSync(path.join(dir, 'data.db'), 'not a database');
+    expect(() => createStore({ dataDir: dir })).toThrow(/数据/);
+  });
+
+  it('不再产生 drafts.json / cache/；数据落在 data.db', async () => {
     const h = makeHarness();
-    expect(await h.drafts.list()).toEqual([]);
+    await h.drafts.save(INPUT);
+    expect(fs.existsSync(path.join(dir, 'data.db'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'drafts.json'))).toBe(false);
+    expect(fs.existsSync(path.join(dir, 'cache'))).toBe(false);
+  });
+
+  it('send 成功后失效 Sent 缓存', async () => {
+    const h = makeHarness();
+    const d = await h.drafts.save(INPUT);
+    await h.drafts.send(d.id);
+    expect(h.invalidated).toContainEqual(['acc1', 'Sent']);
+  });
+
+  it('discard 成功后失效 Drafts 缓存', async () => {
+    const h = makeHarness();
+    const d = await h.drafts.save(INPUT);
+    await h.drafts.discard(d.id);
+    expect(h.invalidated).toContainEqual(['acc1', 'Drafts']);
   });
 
   it('discard pending → deleteMessage 被调 + 状态 discarded', async () => {
@@ -256,8 +293,13 @@ describe('drafts state machine', () => {
   });
 
   it('SMTP 成功后登记失败 → 抛「请勿重发」而非可重试文案', async () => {
-    const h = makeHarness({ smtpSend: async () => { fs.rmSync(path.join(dir, 'drafts.json')); } });
+    let draftId = '';
+    const h = makeHarness({
+      smtpSend: async () => {},
+      afterSmtp: (store) => { store.deleteDrafts([draftId]); },
+    });
     const d = await h.drafts.save(INPUT);
+    draftId = d.id;
     await expect(h.drafts.send(d.id)).rejects.toThrow('请勿重发');
     await expect(h.drafts.send(d.id)).rejects.toThrow('不存在');
   });
