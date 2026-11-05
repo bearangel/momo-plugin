@@ -144,6 +144,12 @@
   }
   // 宿主面板 iframe 无 allow-modals：原生弹窗不可用——面板自绘确认条
   var confirmPending = null;
+  // 关闭确认条并把未决确认按「取消」结算（切账号时防串号/防误删）
+  function cancelConfirm() {
+    var bar = $('confirm-bar');
+    if (bar) bar.style.display = 'none';
+    if (confirmPending) { var prev = confirmPending; confirmPending = null; prev(false); }
+  }
   function inlineConfirm(message) {
     if (confirmPending) { var prev = confirmPending; confirmPending = null; prev(false); }
     var bar = $('confirm-bar');
@@ -242,7 +248,9 @@
       var h = '<div class="hd"><div class="subj">' + esc(m.subject) + '</div>' +
         '<div class="m">发件人 ' + esc(m.from) + ' · ' + esc((m.date || '').replace('T', ' ').slice(0, 19)) + (m.truncated ? ' · <span style="color:var(--err)">正文已截断</span>' : '') + '</div></div>';
       if (m.html) {
-        var doc = '<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="' + MAIL_CSP + '"><base target="_self"></head><body>' + m.html + '</body></html>';
+        // 组装 srcdoc 前剥离 meta refresh：自导航不落 CSP 管辖，仍可触发跟踪请求
+        var safeHtml = String(m.html || '').replace(/<meta[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, '');
+        var doc = '<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="' + MAIL_CSP + '"><base target="_self"></head><body>' + safeHtml + '</body></html>';
         h += '<iframe sandbox="" style="width:100%;height:60%;border:0" srcdoc="' + attrEsc(doc) + '"></iframe><p class="hint" style="padding:0 14px">HTML 邮件以全惰性 iframe 渲染（脚本/远程资源已禁用）</p>';
       } else {
         h += '<div class="body">' + esc(m.text) + '</div>';
@@ -290,9 +298,12 @@
   }
   function delAccount() {
     if (!S.accId) return;
-    inlineConfirm('删除该邮箱账号？（本地配置与凭据，不动服务器）').then(function (ok) {
+    // 目标快照：确认条无遮罩，期间可切换账号——删除目标以进入确认时为准，不读后续的 S.accId
+    var targetId = S.accId;
+    var target = (S.accounts || []).filter(function (a) { return a.id === targetId; })[0];
+    inlineConfirm('删除邮箱账号 ' + (target ? (target.displayName || target.email) : targetId) + '？（本地配置与凭据，不动服务器）').then(function (ok) {
       if (!ok) return;
-      call('accounts.delete', { id: S.accId }).then(function () { S.accId = null; boot(); })
+      call('accounts.delete', { id: targetId }).then(function () { if (S.accId === targetId) S.accId = null; boot(); })
         .catch(function (e) { showListError('删除账号失败：' + e.message); });
     });
   }
@@ -301,16 +312,16 @@
   function sendDraft(id) {
     inlineConfirm('确认发送这封草稿？').then(function (ok) {
       if (!ok) return;
-      call('drafts.send', { draftId: id }).then(reloadList)
+      call('drafts.send', { draftId: id }).then(function () { reloadList(true); })
         .catch(function (e) { showListError('发送失败：' + e.message); reloadList(true); });
     });
   }
   function discardDraft(id) {
-    call('drafts.discard', { draftId: id }).then(reloadList)
+    call('drafts.discard', { draftId: id }).then(function () { reloadList(true); })
       .catch(function (e) { showListError('放弃草稿失败：' + e.message); });
   }
 
-  function pickAccount(id) { S.accId = id; S.folder = 'INBOX'; S.page = 1; call('folders.list', { accountId: id }).then(function (f) { S.folders = f; renderAccounts(); reloadList(); }).catch(function (e) { showListError('文件夹列表加载失败：' + e.message); }); }
+  function pickAccount(id) { cancelConfirm(); S.accId = id; S.folder = 'INBOX'; S.page = 1; call('folders.list', { accountId: id }).then(function (f) { S.folders = f; renderAccounts(); reloadList(); }).catch(function (e) { showListError('文件夹列表加载失败：' + e.message); }); }
   function pickFolder(p) { S.folder = p; S.page = 1; renderAccounts(); reloadList(); }
   function turnPage(d) { S.page = Math.max(1, S.page + d); reloadList(); }
 

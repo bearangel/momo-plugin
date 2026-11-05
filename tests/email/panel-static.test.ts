@@ -41,9 +41,15 @@ describe.skipIf(!HOST_READY)('email panel', () => {
     const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
     // C-1：宿主 iframe sandbox="allow-scripts" 无 allow-modals——window.confirm 恒 false、alert 静默丢
     expect(html).not.toMatch(/\bwindow\.confirm\b/);
+    // 原 bug 的书写形态是裸 confirm(...)——补此锁（inlineConfirm/cancelConfirm 首字母大写，不误伤）
+    expect(html).not.toMatch(/\bconfirm\s*\(/);
     expect(html).not.toMatch(/\balert\s*\(/);
     expect(html).toContain('id="confirm-bar"');
     expect(html).toContain('inlineConfirm');
+    // N-1：删除目标以进入确认时为准的快照（防确认期间切账号删错）
+    expect(html).toContain('targetId');
+    // N-2：meta refresh 剥离（自导航不落 CSP 管辖）
+    expect(html).toContain('refresh');
     // C-2：服务端可控文本（health.message / 文件夹路径）进属性须转义；内联 handler 不得拼 JS 串
     expect(html).toContain('attrEsc');
     expect(html).toContain('data-acc');
