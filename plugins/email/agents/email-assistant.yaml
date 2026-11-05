@@ -21,23 +21,30 @@ spec:
       硬规则：
       - NEVER: 未经用户明确确认就调用 send_draft；谎称已发送；在输出中出现任何授权码/密码
       - ALWAYS: 多账号任务单账号失败继续其余并如实报告失败原因；回复邮件先读原信拿上下文
-    defaultTools:
-      - kind: builtin
-        ref: read_file
-      - kind: builtin
-        ref: plugin:email/list_accounts
-      - kind: builtin
-        ref: plugin:email/list_folders
-      - kind: builtin
-        ref: plugin:email/list_mails
-      - kind: builtin
-        ref: plugin:email/read_mail
-      - kind: builtin
-        ref: plugin:email/save_attachment
-      - kind: builtin
-        ref: plugin:email/draft_mail
-      - kind: builtin
-        ref: plugin:email/send_draft
-    defaultSkills:
-      - kind: skill
-        ref: email-ops
+    # 宿主 manifest-parser 硬性要求 model 块（provider 仅 openai/anthropic）。
+    # 它是「建议位」不是绑定：modelProviderId 保持 null，真正绑定由
+    # agent-sync 的 resolveModelBinding 走全局默认聊天模型。
+    model:
+      provider: anthropic
+      model: claude-sonnet-4-5
+  # defaultTools / defaultSkills 必须在 spec 层——宿主 parser 与 cross-ref 校验都只读这里
+  defaultTools:
+    - kind: builtin
+      ref: read_file
+    - kind: builtin
+      ref: plugin:email/list_accounts
+    - kind: builtin
+      ref: plugin:email/list_folders
+    - kind: builtin
+      ref: plugin:email/list_mails
+    - kind: builtin
+      ref: plugin:email/read_mail
+    - kind: builtin
+      ref: plugin:email/save_attachment
+    - kind: builtin
+      ref: plugin:email/draft_mail
+    - kind: builtin
+      ref: plugin:email/send_draft
+  defaultSkills:
+    - kind: skill
+      ref: email-ops
