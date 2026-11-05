@@ -45,7 +45,7 @@ describe.skipIf(!HOST_READY)('email panel', () => {
     for (const anchor of [
       'mail-tools', '显示远程图片', '远程图片已屏蔽',
       'img-src data: cid:', 'https: http:', 'flex:1',
-      'sandbox=""', 'Content-Security-Policy',
+      'sandbox=""', 'Content-Security-Policy', 'typeof m.html === \'string\'',
     ]) {
       expect(html).toContain(anchor);
     }

@@ -117,7 +117,7 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     const parsed = await parseMail(source);
     const text = String(parsed.text || '');
     const textTruncated = text.length > TEXT_TRUNCATE;
-    const htmlRaw = parsed.html == null ? null : String(parsed.html);
+    const htmlRaw = typeof parsed.html === 'string' && parsed.html.trim() !== '' ? parsed.html : null;
     const htmlTruncated = htmlRaw != null && htmlRaw.length > TEXT_TRUNCATE;
     const view = {
       uid, subject: env.subject, from: env.from, to: env.to, date: env.date, seen: env.seen,

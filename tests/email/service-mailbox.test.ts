@@ -114,6 +114,22 @@ describe('mailbox', () => {
     expect(r.truncated).toBe(true);
   });
 
+  it('read：mailparser html=false → 归一为 null（纯文本不误判 HTML）', async () => {
+    const mb = makeMailbox(makeImap(), {
+      parseMail: async () => ({ text: '纯文本正文', html: false, attachments: [] }),
+    });
+    const r = await mb.read('acc1', 'INBOX', 3);
+    expect(r.html).toBeNull();
+    expect(r.text).toBe('纯文本正文');
+  });
+
+  it('read：mailparser html="" → 归一为 null', async () => {
+    const mb = makeMailbox(makeImap(), {
+      parseMail: async () => ({ text: 't', html: '', attachments: [] }),
+    });
+    expect((await mb.read('acc1', 'INBOX', 3)).html).toBeNull();
+  });
+
   it('read：HTML-only >200KB 同样截断（Important-3）', async () => {
     const mb = makeMailbox(makeImap(), { parseMail: async () => ({ text: '', html: 'h'.repeat(250 * 1024), attachments: [] }) });
     const r = await mb.read('acc1', 'INBOX', 3);

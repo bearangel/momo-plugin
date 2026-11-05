@@ -252,7 +252,7 @@
   function renderMail(m) {
     var h = '<div class="hd"><div class="subj">' + esc(m.subject) + '</div>' +
       '<div class="m">发件人 ' + esc(m.from) + ' · ' + esc((m.date || '').replace('T', ' ').slice(0, 19)) + (m.truncated ? ' · <span style="color:var(--err)">正文已截断</span>' : '') + '</div></div>';
-    if (m.html) {
+    if (typeof m.html === 'string' && m.html.trim() !== '') {
       var tools = '<div class="mail-tools"><span>' + (S.showRemoteImages ? '已允许远程图片' : '远程图片已屏蔽（防跟踪）') + '</span>' +
         '<button style="padding:2px 8px" onclick="toggleRemoteImages()">' + (S.showRemoteImages ? '屏蔽远程图片' : '显示远程图片') + '</button></div>';
       // 组装 srcdoc 前剥离 meta refresh：自导航不落 CSP 管辖，仍可触发跟踪请求
@@ -260,7 +260,8 @@
       var doc = '<!DOCTYPE html><html><head><meta http-equiv="Content-Security-Policy" content="' + mailCsp(S.showRemoteImages) + '"><base target="_self"></head><body>' + safeHtml + '</body></html>';
       h += tools + '<iframe sandbox="" style="width:100%;flex:1;min-height:280px;border:0;background:#fff" srcdoc="' + attrEsc(doc) + '"></iframe>';
     } else {
-      h += '<div class="body">' + esc(m.text) + '</div>';
+      var bodyText = String(m.text == null ? '' : m.text);
+      h += '<div class="body">' + (bodyText.trim() ? esc(bodyText) : '<span class="hint">（无正文）</span>') + '</div>';
     }
     if (m.attachments && m.attachments.length) {
       h += '<div class="hd"><b>附件</b>（保存到工作区请在会话中让邮件助手处理）</div><div style="padding:0 14px 14px">';
