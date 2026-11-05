@@ -87,17 +87,15 @@ describe.skipIf(!HOST_READY)('email panel', () => {
   });
 });
 
-describe('面板存储设置区（2026-11-05 归档 spec §10）', () => {
-  it('存储入口/弹层/选目录桥/清空/风险提示齐备', () => {
+describe('面板存储入口已移除（2026-11-05 配置迁移裁定：管理面仅设置页）', () => {
+  it('无存储按钮/弹层/管理动作；远程图片默认值仍读 config.get', () => {
     const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
-    expect(html).toContain('存储…');
-    expect(html).toContain('id="st-path"');
+    expect(html).not.toContain('存储…');
+    expect(html).not.toContain('storage-form');
+    expect(html).not.toContain('openStorage');
+    expect(html).not.toContain('clearArchive');
+    expect(html).not.toContain('archive.getSettings');
+    expect(html).not.toContain('archive.clear');
     expect(html).toContain("call('config.get'");
-    expect(html).not.toContain('chooseStorageDir');
-    expect(html).not.toContain("send('app:pickDirectory'");
-    expect(html).toContain('设置 → 插件');
-    expect(html).toContain('archive.getSettings');
-    expect(html).toContain('archive.clear');
-    expect(html).toContain('主密钥丢失');
   });
 });

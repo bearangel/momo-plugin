@@ -50,6 +50,10 @@ function imapAdapterFor(ImapFlow) {
       auth: { user: account.username, pass: password },
       logger: false,
     });
+    // imapflow 空闲超时（Socket timeout/ETIMEOUT）经 emit('error') 上抛——不挂监听会变成
+    // 主进程未捕获异常（Electron 弹 Uncaught Exception 窗）。imapflow 自身已按错误类型收尾
+    // （NOOP 保活或 close），此处只需兜住事件；连接失效由 usable()/connOf 自愈重建。
+    client.on('error', () => {});
     await client.connect();
     if (client.namespace && shouldResetNamespace(client.namespace.prefix)) {
       client.namespace = { prefix: '', delimiter: client.namespace.delimiter || '/' };
@@ -61,6 +65,7 @@ function imapAdapterFor(ImapFlow) {
       try { return await fn(); } finally { lock.release(); }
     };
     return {
+      usable: () => client.usable !== false,
       list: async () => (await client.list()).map((f) => ({ path: f.path, specialUse: f.specialUse || null })),
       search: async (folder, crit) => {
         const s = { ...crit };

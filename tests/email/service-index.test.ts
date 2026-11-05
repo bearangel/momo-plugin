@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
 import { buildService, shouldResetNamespace } from '../../plugins/email/service/index';
 
@@ -12,13 +13,13 @@ afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 
 // 保真 FakeImapFlow：真实 ImapFlow 未选箱时 search/fetch/fetchOne 静默空返回（Critical-1 根因），
 // 假实现必须同样拒绝操作，否则「适配层忘了 getMailboxLock」会被测试假绿放行。
-class FakeImapFlow {
+class FakeImapFlow extends EventEmitter {
   opts: unknown;
   selectedFolder: string | null = null;
   openedFolders: string[] = [];
   lastSearch: unknown = null;
   namespace: { prefix: string; delimiter: string } = { prefix: '', delimiter: '/' };
-  constructor(opts: unknown) { this.opts = opts; }
+  constructor(opts: unknown) { super(); this.opts = opts; }
   async connect() {}
   async logout() {}
   async list() {
@@ -456,5 +457,24 @@ describe('createService 宿主入口装配（配置迁移布线回归锁）', ()
     await svc3.stop();
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(rootB, { recursive: true, force: true });
+  });
+});
+
+describe('IMAP 连接 error 事件兜底（Socket timeout 不再未捕获弹窗）', () => {
+  it('client emit error → 不抛未捕获；连接标记不可用并在下次操作重建', async () => {
+    const instances: Array<InstanceType<typeof FakeImapFlow>> = [];
+    class Flow extends FakeImapFlow {
+      constructor(opts: unknown) { super(opts); instances.push(this as never); }
+    }
+    const svc = buildService(makeDeps({ imapflow: Flow }));
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    await svc.handle('folders.list', { accountId: acc.id });
+    expect(instances.length).toBe(1);
+    expect(() => instances[0]!.emit('error', Object.assign(new Error('Socket timeout'), { code: 'ETIMEOUT' }))).not.toThrow();
+    // 模拟 imapflow 错误后自 close：usable=false → connOf 应丢弃重建
+    (instances[0] as unknown as { usable: boolean }).usable = false;
+    await svc.handle('mails.list', { accountId: acc.id, folder: 'INBOX', page: 1, pageSize: 5 });
+    expect(instances.length).toBe(2);
+    await svc.stop();
   });
 });

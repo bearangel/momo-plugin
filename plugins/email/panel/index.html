@@ -47,8 +47,6 @@
   #confirm-bar .msg { color: var(--tx); }
   #compose { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; }
   #compose .box { background: var(--bg); border: 1px solid var(--bd); border-radius: 10px; padding: 16px; width: 480px; display: flex; flex-direction: column; gap: 8px; max-height: 90vh; overflow: auto; }
-  #storage-form { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 20; }
-  #storage-form .box { background: var(--bg); border: 1px solid var(--bd); border-radius: 10px; padding: 16px; width: 440px; display: flex; flex-direction: column; gap: 8px; }
   #compose label { font-size: 11px; color: var(--tx2); }
   #compose textarea { min-height: 160px; resize: vertical; }
   #toast { position: fixed; left: 50%; top: 18px; transform: translateX(-50%); background: var(--tx); color: var(--bg); padding: 6px 14px; border-radius: 6px; display: none; z-index: 40; }
@@ -56,7 +54,7 @@
 </head>
 <body>
   <div class="col-left">
-    <div class="toolbar"><button class="pri" onclick="openAccountForm('add')">+ 添加账号</button><button onclick="openAccountForm('edit')">编辑当前账号</button><button onclick="openStorage()">存储…</button></div>
+    <div class="toolbar"><button class="pri" onclick="openAccountForm('add')">+ 添加账号</button><button onclick="openAccountForm('edit')">编辑当前账号</button></div>
     <div id="folders"></div>
   </div>
   <div class="col-mid">
@@ -117,19 +115,6 @@
     </div>
   </div>
 
-  <div id="storage-form">
-    <div class="box">
-      <b>本地邮件存储</b>
-      <label>存储目录</label>
-      <input id="st-path" readonly placeholder="未启用（仅在线读信）">
-      <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button onclick="clearArchive()">清空本地库…</button>
-        <button class="pri" onclick="document.getElementById('storage-form').style.display='none'">关闭</button>
-      </div>
-      <div class="hint" id="st-note">存储目录在 设置 → 插件 → 邮件 中配置（留空使用默认目录）。正文与附件加密存储；数据库仅存路径索引；主密钥保存在系统钥匙串，主密钥丢失后本地邮件不可恢复。</div>
-      <div class="status" id="st-stats"></div>
-    </div>
-  </div>
 
   <div id="toast"></div>
 
@@ -447,28 +432,6 @@
     }
     call('accounts.add', input).then(function () { closeAccountForm(); boot(); })
       .catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
-  }
-  // —— 本地存储设置（归档 spec §10：选目录走平台桥，统计/清空走 archive 路由）——
-  function openStorage() {
-    $('storage-form').style.display = 'flex';
-    $('st-stats').className = 'status';
-    $('st-stats').textContent = '加载中…';
-    call('archive.getSettings', {}).then(function (s) {
-      $('st-path').value = s.enabled ? (s.rootPath || '') : '';
-      var warn = [];
-      if (s.missing) warn.push('缺失 ' + s.missing);
-      if (s.corrupt) warn.push('损坏 ' + s.corrupt);
-      $('st-stats').textContent = s.enabled
-        ? '文件 ' + s.files + ' 个 / ' + (s.bytes / 1048576).toFixed(1) + ' MB' + (warn.length ? '（' + warn.join('，') + '，重开邮件可自愈）' : '')
-        : '';
-    }).catch(function (e) { $('st-stats').className = 'status err'; $('st-stats').textContent = '读取失败：' + e.message; });
-  }
-  function clearArchive() {
-    inlineConfirm('清空本地邮件库？仅删除当前目录的加密文件与索引，不影响服务器邮件。').then(function (ok) {
-      if (!ok) return;
-      call('archive.clear', {}).then(function (r) { toast('已清理 ' + r.removed + ' 条'); openStorage(); })
-        .catch(function (e) { $('st-stats').className = 'status err'; $('st-stats').textContent = e.message; });
-    });
   }
 
   function delAccount() {
