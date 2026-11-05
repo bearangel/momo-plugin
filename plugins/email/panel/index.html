@@ -375,8 +375,19 @@
       $('f-status').textContent = r.ok ? '连接成功 ✓（可保存）' : '失败：' + r.error;
     }).catch(function (e) { S.testOk = false; $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
   }
+  // 编辑态仅改保留时长/显示名（及密码留空）时无需重新测试；连接字段或密码变更才要求测试。
+  function needsRetest() {
+    if (!S.editId) return true;
+    var a = (S.accounts || []).filter(function (x) { return x.id === S.editId; })[0];
+    if (!a) return true;
+    var f = formInput();
+    if (f.password !== '') return true;
+    return f.username !== a.username
+      || f.imap.host !== a.imap.host || Number(f.imap.port) !== Number(a.imap.port) || f.imap.tlsMode !== a.imap.tlsMode
+      || f.smtp.host !== a.smtp.host || Number(f.smtp.port) !== Number(a.smtp.port) || f.smtp.tlsMode !== a.smtp.tlsMode;
+  }
   function saveAccount() {
-    if (S.testOk !== true) { $('f-status').className = 'status err'; $('f-status').textContent = '请先测试连接'; return; }
+    if (S.testOk !== true && needsRetest()) { $('f-status').className = 'status err'; $('f-status').textContent = '请先测试连接'; return; }
     var input = formInput();
     if (S.editId) {
       var patch = { displayName: input.displayName, username: input.username, retention: input.retention, imap: input.imap, smtp: input.smtp };

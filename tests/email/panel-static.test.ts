@@ -49,6 +49,7 @@ describe.skipIf(!HOST_READY)('email panel', () => {
       'id="f-retention"', '<option value="forever">', '<option value="1y">', '<option value="6m">', '<option value="1m">',
       '写邮件', 'id="compose"', 'id="c-files"', 'type="file"', '存草稿', 'drafts.save', 'drafts.send',
       '编辑当前账号', "openAccountForm('edit')", 'readOnly = true', '留空则不修改', 'accounts.update',
+      'needsRetest', 'S.testOk !== true && needsRetest()',
     ]) {
       expect(html).toContain(anchor);
     }
