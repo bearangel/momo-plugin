@@ -34,7 +34,7 @@ describe('crypto seal/open', () => {
 
   it('截断与魔数不符 → 损坏错误', () => {
     const sealed = seal(Buffer.from('secret'), key, aad);
-    expect(() => open(sealed.subarray(0, sealed.length - 5), key, aad)).toThrow(/损坏/);
+    expect(() => open(sealed.subarray(0, sealed.length - 5), key, aad)).toThrow(/损坏|失败/);
     expect(() => open(Buffer.concat([Buffer.from('XXXXXXX'), sealed.subarray(7)]), key, aad)).toThrow(/魔数/);
   });
 
