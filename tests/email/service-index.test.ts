@@ -1,5 +1,5 @@
 // tests/email/service-index.test.ts
-// handle 路由 / 未知方法 / accounts.test 双探测 / tlsMode 映射 / drafts.save→send 全链
+// handle 路由 / 未知方法 / accounts.test 双探测+先测后存 / tlsMode 映射 / drafts.save→send 全链
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -66,6 +66,17 @@ describe('service index', () => {
     const svc = buildService(makeDeps());
     await svc.handle('accounts.add', ACC_INPUT);
     expect(await svc.handle('accounts.test', { email: 'a@qq.com' })).toEqual({ ok: true });
+  });
+
+  it('accounts.test 先测后存：表单直测（带 imap/smtp/password）回 ok 且不落库不写凭据', async () => {
+    let secretWrites = 0;
+    const svc = buildService(makeDeps({
+      secrets: { get: async () => null, set: async () => { secretWrites += 1; }, delete: async () => {} },
+    }));
+    const r = await svc.handle('accounts.test', { ...ACC_INPUT, email: 'probe@qq.com' });
+    expect(r).toEqual({ ok: true });
+    expect(await svc.handle('accounts.list', {})).toHaveLength(0);
+    expect(secretWrites).toBe(0);
   });
 
   it('tlsMode=tls → ImapFlow secure:true（starttls → requireTLS，明文不可能构造）', async () => {

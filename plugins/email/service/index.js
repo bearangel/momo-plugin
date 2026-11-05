@@ -11,6 +11,19 @@ const { renderRawMail } = require('./lib/rfc822');
 
 function vendor(name) { return require(path.join(__dirname, '..', 'vendor', 'node_modules', name)); }
 
+const TLS_MODES = ['tls', 'starttls'];
+
+/** 端点校验（与 lib/accounts.js add 侧同规则——明文连接不可能构造） */
+function assertEndpoint(label, ep) {
+  if (!ep || typeof ep.host !== 'string' || ep.host.trim() === '') throw new Error(`${label}.host 不能为空`);
+  if (!Number.isInteger(ep.port) || ep.port < 1 || ep.port > 65535) {
+    throw new Error(`${label} 端口非法（${ep && ep.port}）`);
+  }
+  if (!TLS_MODES.includes(ep.tlsMode)) {
+    throw new Error(`${label}.tlsMode 必须是 tls/starttls（明文连接拒绝）`);
+  }
+}
+
 /** smtp transport 构造（tlsMode 映射强制加密——明文不可能构造） */
 function smtpTransportOf(nodemailerLib, acc, pw) {
   return acc.smtp.tlsMode === 'tls'
@@ -91,6 +104,25 @@ function buildService(deps) {
     'accounts.delete': (p) => accountStore.remove(p.id),
     'accounts.test': async (p) => {
       const acc = (await accountStore.list()).find((a) => a.email === p.email);
+      // 先测后存：表单直测（账号尚未落库）——用入参临时探测，不写 accounts.json、不写 secrets
+      if (!acc && p.imap && p.smtp) {
+        assertEndpoint('imap', p.imap);
+        assertEndpoint('smtp', p.smtp);
+        const probe = {
+          email: p.email,
+          username: p.username || p.email,
+          imap: { host: p.imap.host, port: p.imap.port, tlsMode: p.imap.tlsMode },
+          smtp: { host: p.smtp.host, port: p.smtp.port, tlsMode: p.smtp.tlsMode },
+        };
+        try {
+          const conn = await imapConnect(probe, p.password);
+          await conn.close();
+          await smtpTransportOf(deps.nodemailerLib, probe, p.password).verify();
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: String((err && err.message) || err) };
+        }
+      }
       if (!acc) throw new Error(`账号不存在: ${p.email}`);
       const pw = await accountStore.getPassword(acc.id);
       try {
@@ -109,7 +141,7 @@ function buildService(deps) {
     'mails.list': (p) => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
       { page: p.page, pageSize: p.pageSize, filter: p.filter, force: false }),
     'mails.refresh': (p) => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
-      { force: true, filter: p.filter }),
+      { force: true, filter: p.filter, page: p.page, pageSize: p.pageSize }),
     'mails.get': (p) => mailbox.read(p.accountId, p.folder, p.uid),
     'attachments.get': (p) => mailbox.attachment(p.accountId, p.folder, p.uid, p.partId),
     'drafts.save': async (p) => {

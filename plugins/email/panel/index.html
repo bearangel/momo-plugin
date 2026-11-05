@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>邮件</title>
+<style>
+  :root { --bg:#fff; --s1:#f7f7f8; --s2:#eeeef0; --tx:#1a1a1e; --tx2:#66666e; --tx3:#99999f; --bd:#e2e2e5; --acc:#3b6ef5; --err:#d33; --ok:#3a3; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font: 12.5px/1.6 -apple-system, 'PingFang SC', sans-serif; height: 100vh; display: flex; color: var(--tx); background: var(--bg); }
+  .col-left { width: 200px; border-right: 1px solid var(--bd); overflow: auto; padding: 8px; flex-shrink: 0; }
+  .col-mid { width: 320px; border-right: 1px solid var(--bd); display: flex; flex-direction: column; flex-shrink: 0; }
+  .col-right { flex: 1; overflow: auto; }
+  .acc { padding: 6px 8px; border-radius: 6px; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+  .acc:hover, .acc.on { background: var(--s2); }
+  .acc .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); flex-shrink: 0; }
+  .acc .dot.err { background: var(--err); }
+  .folder { padding: 3px 8px 3px 22px; color: var(--tx2); cursor: pointer; border-radius: 4px; display: flex; justify-content: space-between; }
+  .folder:hover, .folder.on { background: var(--s2); color: var(--tx); }
+  .folder .n { color: var(--tx3); }
+  .toolbar { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--bd); }
+  input, select, textarea { font: inherit; border: 1px solid var(--bd); border-radius: 5px; padding: 4px 8px; background: var(--bg); color: var(--tx); min-width: 0; }
+  .mail { padding: 7px 10px; border-bottom: 1px solid var(--bd); cursor: pointer; }
+  .mail:hover, .mail.on { background: var(--s1); }
+  .mail .subj { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .mail.unread .subj::before { content: '● '; color: var(--acc); }
+  .mail .meta { display: flex; justify-content: space-between; color: var(--tx3); font-size: 11px; }
+  .mail .meta .att { color: var(--acc); }
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: center; padding: 6px; color: var(--tx3); }
+  button { font: inherit; border: 1px solid var(--bd); background: var(--s1); color: var(--tx); border-radius: 5px; padding: 4px 10px; cursor: pointer; }
+  button.pri { background: var(--acc); border-color: var(--acc); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  .hd { padding: 10px 14px; border-bottom: 1px solid var(--bd); }
+  .hd .subj { font-size: 14px; font-weight: 700; }
+  .hd .m { color: var(--tx2); font-size: 11.5px; }
+  .body { padding: 12px 14px; white-space: pre-wrap; word-break: break-word; }
+  .att-row { display: flex; gap: 10px; padding: 3px 0; color: var(--tx2); }
+  .hint { color: var(--tx3); font-size: 11px; }
+  .status { padding: 4px 8px; min-height: 20px; color: var(--tx3); }
+  .status.err { color: var(--err); }
+  #account-form { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; }
+  #account-form .box { background: var(--bg); border: 1px solid var(--bd); border-radius: 10px; padding: 16px; width: 380px; display: flex; flex-direction: column; gap: 8px; }
+  #account-form label { font-size: 11px; color: var(--tx2); }
+  .draft .ops { display: flex; gap: 8px; margin-top: 6px; }
+</style>
+</head>
+<body>
+  <div class="col-left">
+    <div class="toolbar"><button class="pri" onclick="openAccountForm()">+ 添加账号</button></div>
+    <div id="folders"></div>
+  </div>
+  <div class="col-mid">
+    <div class="toolbar">
+      <input id="q" placeholder="搜索主题/发件人" style="flex:1" onkeydown="if(event.key==='Enter')reloadList()">
+      <button onclick="reloadList(true)">刷新</button>
+    </div>
+    <div id="maillist" style="flex:1;overflow:auto"></div>
+    <div class="pager">
+      <button onclick="turnPage(-1)">‹ 上一页</button>
+      <span id="pageinfo"></span>
+      <button onclick="turnPage(1)">下一页 ›</button>
+    </div>
+  </div>
+  <div class="col-right"><div id="reader"><p class="hint" style="padding:14px">选择左侧邮件查看</p></div></div>
+
+  <div id="account-form">
+    <div class="box">
+      <b>添加邮箱账号</b>
+      <label>常用预设</label>
+      <select id="f-preset" onchange="applyPreset()"><option value="">— 选择或自定义 —</option><option value="qq">QQ 邮箱</option><option value="163">163 邮箱</option><option value="gmail">Gmail</option><option value="outlook">Outlook</option></select>
+      <label>邮箱地址</label><input id="f-email" placeholder="you@example.com" oninput="applyPreset()">
+      <label>显示名（可选）</label><input id="f-name">
+      <label>IMAP 服务器 / 端口 / 加密</label>
+      <div style="display:flex;gap:6px"><input id="f-ih" style="flex:1"><input id="f-ip" style="width:64px"><select id="f-it"><option value="tls">TLS(993)</option><option value="starttls">STARTTLS(143)</option></select></div>
+      <label>SMTP 服务器 / 端口 / 加密</label>
+      <div style="display:flex;gap:6px"><input id="f-sh" style="flex:1"><input id="f-sp" style="width:64px"><select id="f-st"><option value="tls">TLS(465)</option><option value="starttls">STARTTLS(587)</option></select></div>
+      <label>用户名（通常=邮箱地址）</label><input id="f-user">
+      <label>授权码 / 应用密码（不回显，存系统钥匙串）</label><input id="f-pw" type="password">
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button onclick="closeAccountForm()">取消</button>
+        <button onclick="testAccount()">测试连接</button>
+        <button class="pri" onclick="saveAccount()">保存</button>
+      </div>
+      <div class="status" id="f-status"></div>
+    </div>
+  </div>
+
+<script>
+  // PanelChannel 胶水（codegraph 同款协议）：postMessage '*' + rpc:result 回包 + ready 握手
+  var seq = 0, pending = {};
+  function send(type, extra) {
+    var id = ++seq;
+    parent.postMessage(Object.assign({ type: type, id: id }, extra || {}), '*');
+    return new Promise(function (resolve, reject) {
+      pending[id] = { resolve: resolve, reject: reject };
+      setTimeout(function () { if (pending[id]) { pending[id].reject(new Error('rpc 超时')); delete pending[id]; } }, 30000);
+    });
+  }
+  window.addEventListener('message', function (ev) {
+    var m = ev.data;
+    if (!m || m.type !== 'rpc:result' || !pending[m.id]) return;
+    if (m.error !== undefined) pending[m.id].reject(new Error(String(m.error)));
+    else pending[m.id].resolve(m.result);
+    delete pending[m.id];
+  });
+  function call(method, params) { return send('plugin:callService', { method: method, params: params || {} }); }
+
+  // 状态
+  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [] };
+  var PRESETS = {
+    qq: { ih: 'imap.qq.com', ip: 993, it: 'tls', sh: 'smtp.qq.com', sp: 465, st: 'tls' },
+    '163': { ih: 'imap.163.com', ip: 993, it: 'tls', sh: 'smtp.163.com', sp: 465, st: 'tls' },
+    gmail: { ih: 'imap.gmail.com', ip: 993, it: 'tls', sh: 'smtp.gmail.com', sp: 465, st: 'tls' },
+    outlook: { ih: 'outlook.office365.com', ip: 993, it: 'tls', sh: 'smtp.office365.com', sp: 587, st: 'starttls' },
+  };
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  // onclick 内联属性的 JS 字符串实参转义（文件夹路径由 IMAP 服务端下发，须防引号截断）
+  function jsArg(s) { return "'" + String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/[\r\n]/g, ' ') + "'"; }
+
+  // 主题跟随：ready 回包携 tokens（有则覆写 CSS 变量）
+  function applyTheme(res) {
+    if (!res || !res.tokens) return;
+    var map = { '--bg': 'bg-canvas', '--s1': 'surface-1', '--s2': 'surface-2', '--tx': 'text-primary', '--tx2': 'text-secondary', '--tx3': 'text-tertiary', '--bd': 'border-subtle', '--acc': 'accent-500' };
+    var st = document.documentElement.style;
+    for (var k in map) { var v = res.tokens['--' + map[k]]; if (v) st.setProperty(k, v); }
+  }
+
+  function renderAccounts() {
+    var h = '';
+    S.accounts.forEach(function (a) {
+      h += '<div class="acc' + (a.id === S.accId ? ' on' : '') + '" onclick="pickAccount(' + jsArg(a.id) + ')">' +
+        '<span class="dot' + (a.health && a.health.state === 'error' ? ' err' : '') + '" title="' + esc(a.health && a.health.message || '') + '"></span>' + esc(a.displayName || a.email) +
+        (a.health && a.health.state === 'error' ? ' <span class="hint">!</span>' : '') + '</div>';
+      if (a.id === S.accId && S.folders) {
+        var items = [{ p: 'INBOX', t: '收件箱' }, { p: S.folders.drafts, t: '草稿箱' }, { p: S.folders.sent, t: '已发送' }];
+        items.forEach(function (it) {
+          if (!it.p) return;
+          h += '<div class="folder' + (S.folder === it.p ? ' on' : '') + '" onclick="pickFolder(' + jsArg(it.p) + ')"><span>' + it.t + '</span></div>';
+        });
+      }
+    });
+    h += '<div class="folder" style="color:var(--tx3)" onclick="delAccount()">删除当前账号…</div>';
+    $('folders').innerHTML = h || '<p class="hint" style="padding:8px">尚未配置邮箱——点击「+ 添加账号」</p>';
+  }
+
+  function renderList() {
+    var h = '';
+    S.mails.forEach(function (m) {
+      h += '<div class="mail' + (!m.seen ? ' unread' : '') + (m.uid === S.selUid ? ' on' : '') + '" onclick="openMail(' + m.uid + ')">' +
+        '<div class="subj">' + esc(m.subject || '(无主题)') + '</div>' +
+        '<div class="meta"><span>' + esc(m.from) + '</span><span>' + (m.hasAttachments ? '<span class="att">附件 </span>' : '') + esc((m.date || '').slice(0, 16).replace('T', ' ')) + '</span></div></div>';
+    });
+    $('maillist').innerHTML = h || '<p class="hint" style="padding:10px">无邮件</p>';
+    $('pageinfo').textContent = S.page + ' / ' + Math.max(1, Math.ceil(S.total / S.pageSize)) + '（' + S.total + '）';
+  }
+
+  function renderDraftBox() {
+    call('drafts.list').then(function (ds) {
+      var pendingDrafts = ds.filter(function (d) { return d.status === 'pending'; });
+      if (S.folder !== (S.folders && S.folders.drafts) || pendingDrafts.length === 0) return;
+      var h = '<div style="padding:8px 10px;border-bottom:1px solid var(--bd)"><b>待确认草稿（' + pendingDrafts.length + '）</b></div>';
+      pendingDrafts.forEach(function (d) {
+        h += '<div class="mail draft" style="margin:0"><div class="subj">→ ' + esc((d.to || []).join(', ')) + '：' + esc(d.subject) + '</div>' +
+          '<div class="meta"><span>' + esc(d.summary) + '</span></div>' +
+          '<div class="ops"><button class="pri" onclick="sendDraft(' + jsArg(d.id) + ')">发送</button><button onclick="discardDraft(' + jsArg(d.id) + ')">放弃</button></div></div>';
+      });
+      $('maillist').innerHTML = h + $('maillist').innerHTML;
+    }).catch(function () {});
+  }
+
+  function reloadList(force) {
+    if (!S.accId) return;
+    var filter = {};
+    var q = $('q').value.trim();
+    if (q) filter.subject = q;
+    call(force ? 'mails.refresh' : 'mails.list', { accountId: S.accId, folder: S.folder, page: S.page, pageSize: S.pageSize, filter: filter })
+      .then(function (p) { S.mails = p.items || []; S.total = p.total || 0; renderList(); if (!force) renderDraftBox(); })
+      .catch(function (e) { $('maillist').innerHTML = '<p class="hint" style="padding:10px;color:var(--err)">' + esc(e.message) + '</p>'; });
+  }
+
+  function openMail(uid) {
+    S.selUid = uid;
+    renderList();
+    $('reader').innerHTML = '<p class="hint" style="padding:14px">读取中…</p>';
+    call('mails.get', { accountId: S.accId, folder: S.folder, uid: uid }).then(function (m) {
+      var h = '<div class="hd"><div class="subj">' + esc(m.subject) + '</div>' +
+        '<div class="m">发件人 ' + esc(m.from) + ' · ' + esc((m.date || '').replace('T', ' ').slice(0, 19)) + (m.truncated ? ' · <span style="color:var(--err)">正文已截断</span>' : '') + '</div></div>';
+      if (m.html) {
+        h += '<iframe sandbox="" style="width:100%;height:60%;border:0" srcdoc="' + esc(m.html).replace(/"/g, '&quot;') + '"></iframe><p class="hint" style="padding:0 14px">HTML 邮件以全惰性 iframe 渲染（脚本/远程资源已禁用）</p>';
+      } else {
+        h += '<div class="body">' + esc(m.text) + '</div>';
+      }
+      if (m.attachments && m.attachments.length) {
+        h += '<div class="hd"><b>附件</b>（保存到工作区请在会话中让邮件助手处理）</div><div style="padding:0 14px 14px">';
+        m.attachments.forEach(function (a) { h += '<div class="att-row">[附件] ' + esc(a.filename) + ' <span class="hint">' + Math.ceil((a.size || 0) / 1024) + ' KB</span></div>'; });
+        h += '</div>';
+      }
+      $('reader').innerHTML = h;
+    }).catch(function (e) { $('reader').innerHTML = '<p class="hint" style="padding:14px;color:var(--err)">' + esc(e.message) + '</p>'; });
+  }
+
+  // —— 账号表单 ——
+  function openAccountForm() { $('account-form').style.display = 'flex'; $('f-status').textContent = ''; }
+  function closeAccountForm() { $('account-form').style.display = 'none'; }
+  function applyPreset() {
+    var key = $('f-preset').value || presetKeyOf($('f-email').value);
+    if (key && PRESETS[key]) { var p = PRESETS[key]; $('f-ih').value = p.ih; $('f-ip').value = p.ip; $('f-it').value = p.it; $('f-sh').value = p.sh; $('f-sp').value = p.sp; $('f-st').value = p.st; $('f-user').value = $('f-email').value; }
+  }
+  // 域名 → 预设键（与服务端 lib/accounts.js presetFor 同规则）
+  function presetKeyOf(email) {
+    var domain = String(email || '').split('@')[1] || '';
+    if (domain === 'qq.com' || domain === 'foxmail.com') return 'qq';
+    if (domain.endsWith('163.com')) return '163';
+    if (domain === 'gmail.com') return 'gmail';
+    if (domain.endsWith('outlook.com') || domain.endsWith('hotmail.com')) return 'outlook';
+    return '';
+  }
+  function formInput() {
+    return { email: $('f-email').value.trim(), displayName: $('f-name').value.trim() || null, username: $('f-user').value.trim() || $('f-email').value.trim(), password: $('f-pw').value,
+      imap: { host: $('f-ih').value.trim(), port: Number($('f-ip').value), tlsMode: $('f-it').value },
+      smtp: { host: $('f-sh').value.trim(), port: Number($('f-sp').value), tlsMode: $('f-st').value } };
+  }
+  function testAccount() {
+    $('f-status').className = 'status'; $('f-status').textContent = '连接测试中…';
+    call('accounts.test', formInput()).then(function (r) {
+      $('f-status').className = 'status' + (r.ok ? '' : ' err');
+      $('f-status').textContent = r.ok ? '连接成功 ✓（可保存）' : '失败：' + r.error;
+    }).catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
+  }
+  function saveAccount() {
+    call('accounts.add', formInput()).then(function () { closeAccountForm(); boot(); })
+      .catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
+  }
+  function delAccount() {
+    if (!S.accId || !confirm('删除该邮箱账号？（本地配置与凭据，不动服务器）')) return;
+    call('accounts.delete', { id: S.accId }).then(function () { S.accId = null; boot(); }).catch(function (e) { alert(e.message); });
+  }
+
+  // —— 草稿操作（人工确认发送通道）——
+  function sendDraft(id) { if (!confirm('确认发送这封草稿？')) return; call('drafts.send', { draftId: id }).then(reloadList).catch(function (e) { alert('发送失败：' + e.message); reloadList(true); }); }
+  function discardDraft(id) { call('drafts.discard', { draftId: id }).then(reloadList).catch(function (e) { alert(e.message); }); }
+
+  function pickAccount(id) { S.accId = id; S.folder = 'INBOX'; S.page = 1; call('folders.list', { accountId: id }).then(function (f) { S.folders = f; renderAccounts(); reloadList(); }); }
+  function pickFolder(p) { S.folder = p; S.page = 1; renderAccounts(); reloadList(); }
+  function turnPage(d) { S.page = Math.max(1, S.page + d); reloadList(); }
+
+  function boot() {
+    call('accounts.list').then(function (accs) {
+      S.accounts = accs || [];
+      if (!S.accId && S.accounts.length) { pickAccount(S.accounts[0].id); } else { renderAccounts(); }
+    }).catch(function (e) { $('folders').innerHTML = '<p class="hint" style="padding:8px;color:var(--err)">' + esc(e.message) + '</p>'; });
+  }
+
+  send('ready').then(function (res) { applyTheme(res && res.result ? res.result : res); boot(); setInterval(function () { if (S.accId) reloadList(); }, 60000); });
+</script>
+</body>
+</html>

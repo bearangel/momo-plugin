@@ -1,0 +1,5 @@
+{
+  "panels": [
+    { "id": "mail", "title": "邮件", "icon": "lucide:mail", "location": "page", "entry": "./index.html" }
+  ]
+}
