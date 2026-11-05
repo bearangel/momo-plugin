@@ -123,6 +123,25 @@ describe('service index', () => {
     await svc.stop();
   });
 
+  it('folders.peek / mails.peek 路由形状（本地优先）', async () => {
+    const svc = buildService(makeDeps());
+    await svc.handle('accounts.add', ACC_INPUT);
+    const accId = (await svc.handle('accounts.list', {}))[0].id;
+    expect(await svc.handle('folders.peek', { accountId: accId })).toEqual({ value: null, savedAt: null });
+    const cold = await svc.handle('mails.peek', { accountId: accId, folder: 'INBOX', page: 1, pageSize: 10 }) as Record<string, unknown>;
+    expect(cold).toMatchObject({ items: [], total: 0, page: 1, pageSize: 10, savedAt: null });
+
+    await svc.handle('folders.list', { accountId: accId });
+    const fp = await svc.handle('folders.peek', { accountId: accId }) as { value: { drafts: string }, savedAt: number };
+    expect(fp.value.drafts).toBe('Drafts');
+    expect(fp.savedAt).toBeGreaterThan(0);
+
+    await svc.handle('mails.refresh', { accountId: accId, folder: 'INBOX', page: 1, pageSize: 10 });
+    const mp = await svc.handle('mails.peek', { accountId: accId, folder: 'INBOX', page: 1, pageSize: 10 }) as { items: Array<{ subject: string }>, savedAt: number };
+    expect(mp.items[0]!.subject).toBe('s');
+    expect(mp.savedAt).toBeGreaterThan(0);
+  });
+
   it('mails.list 前必须选箱：openedFolders 含 INBOX（Critical-1 回归锁）', async () => {
     let fake: FakeImapFlow | null = null;
     class Spy extends FakeImapFlow { constructor(o: unknown) { super(o); fake = this; } }

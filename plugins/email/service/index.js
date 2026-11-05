@@ -112,7 +112,7 @@ function buildService(deps) {
   // 桥超时对齐：宿主 callService 桥 requestPluginCallService 超时 10s
   // （momo-studio electron/src/main/agent/plugin-hook-bridge.ts，2026-11-05 实测 < 30s），
   // IMAP 慢操作须先于桥超时落定并给出中文错误——opTimeoutMs = 桥超时 − 2s = 8s。
-  const mailbox = createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutMs: 8000 });
+  const mailbox = createMailbox({ accountStore, cache, imapConnect, parseMail, store, opTimeoutMs: 8000 });
   // SMTP/连通性探测超时：默认 8s（先于宿主 callService 桥 10s 落定，文案含「超时」）。
   const smtpGuard = (label, p, ms = smtpTimeoutMs) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`SMTP ${label} 超时（${ms}ms）`)), ms);
@@ -192,10 +192,12 @@ function buildService(deps) {
       }
     },
     'folders.list': (p) => withHealth(p.accountId, () => mailbox.folders(p.accountId)),
+    'folders.peek': (p) => mailbox.foldersPeek(p.accountId),
     'mails.list': (p) => withHealth(p.accountId, () => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
       { page: p.page, pageSize: p.pageSize, filter: p.filter, force: false })),
     'mails.refresh': (p) => withHealth(p.accountId, () => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
       { force: true, filter: p.filter, page: p.page, pageSize: p.pageSize })),
+    'mails.peek': (p) => mailbox.envelopesPeek(p.accountId, p.folder ?? 'INBOX', { page: p.page, pageSize: p.pageSize }),
     'mails.get': (p) => withHealth(p.accountId, () => mailbox.read(p.accountId, p.folder, p.uid)),
     'attachments.get': (p) => withHealth(p.accountId, () => mailbox.attachment(p.accountId, p.folder, p.uid, p.partId)),
     'drafts.save': async (p) => {

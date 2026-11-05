@@ -57,7 +57,7 @@ function makeMailbox(conn: ReturnType<typeof makeImap>, over: Record<string, unk
     async getPassword() { return 'pw'; },
   };
   return createMailbox({
-    accountStore, cache, imapConnect: async () => conn,
+    accountStore, cache, store, imapConnect: async () => conn,
     parseMail: async () => ({ text: '正文', html: null, attachments: [{ partId: '1.1', filename: 'a.pdf', contentType: 'application/pdf', content: Buffer.from('pdf') }] }),
     opTimeoutMs: 60,
     ...over,
@@ -231,6 +231,85 @@ describe('mailbox', () => {
     ] });
     const page = await makeMailbox(conn).envelopes('acc1', 'INBOX', { force: true });
     expect(page.items.map((e) => e.uid)).toEqual([2, 1]);
+  });
+
+  it('foldersPeek：内存优先（不触网）', async () => {
+    const conn = makeImap();
+    const mb = makeMailbox(conn);
+    await mb.folders('acc1');
+    const before = conn.calls.filter((c) => c === 'list').length;
+    const peek = await mb.foldersPeek('acc1');
+    expect(peek.value!.drafts).toBe('草稿箱');
+    expect(peek.savedAt).toBeGreaterThan(0);
+    expect(conn.calls.filter((c) => c === 'list')).toHaveLength(before);
+  });
+
+  it('foldersPeek：无内存时读 DB（新实例、不触网）', async () => {
+    const mb1 = makeMailbox(makeImap());
+    await mb1.folders('acc1');
+    const offline = makeImap();
+    (offline as unknown as { list: unknown }).list = async () => { throw new Error('should not hit network'); };
+    const peek = await makeMailbox(offline).foldersPeek('acc1');
+    expect(peek.value!.drafts).toBe('草稿箱');
+    expect(offline.calls).toHaveLength(0);
+  });
+
+  it('foldersPeek：都无缓存 → null', async () => {
+    expect(await makeMailbox(makeImap()).foldersPeek('acc1')).toEqual({ value: null, savedAt: null });
+  });
+
+  it('envelopesPeek：忽略 TTL、uid 降序分页、retention 过滤且 Sent 豁免', async () => {
+    const now = new Date().toISOString();
+    const envs = [
+      { uid: 1, subject: 'old', from: 'a', to: 'b', date: '2020-01-01T00:00:00Z', seen: false, hasAttachments: false, size: 100 },
+      { uid: 2, subject: 'mid', from: 'a', to: 'b', date: now, seen: false, hasAttachments: false, size: 100 },
+      { uid: 3, subject: 'new', from: 'a', to: 'b', date: now, seen: false, hasAttachments: false, size: 100 },
+    ];
+    const conn = makeImap({ envelopes: envs });
+    const mb = makeMailbox(conn, { account: { ...ACC, retention: '1m' } });
+    await mb.envelopes('acc1', 'INBOX', { force: true });
+    await mb.envelopes('acc1', '已发送', { force: true });
+    const peek = await mb.envelopesPeek('acc1', 'INBOX', { page: 1, pageSize: 2 });
+    expect(peek.items.map((e) => e.uid)).toEqual([3, 2]);
+    expect(peek.total).toBe(2);
+    expect(peek.savedAt).toBeGreaterThan(0);
+    const sentPeek = await mb.envelopesPeek('acc1', '已发送', { page: 1, pageSize: 10 });
+    expect(sentPeek.items.map((e) => e.uid)).toEqual([3, 2, 1]);
+  });
+
+  it('connOf：usable()===false 时丢弃重建', async () => {
+    const c1 = makeImap();
+    let unusable = false;
+    (c1 as unknown as { usable: unknown }).usable = () => !unusable;
+    const c2 = makeImap();
+    let connects = 0;
+    const mb = makeMailbox(c1, { imapConnect: async () => { connects += 1; return connects === 1 ? c1 : c2; } });
+    await mb.folders('acc1');
+    expect(connects).toBe(1);
+    unusable = true;
+    const page = await mb.envelopes('acc1', 'INBOX', { force: true });
+    expect(connects).toBe(2);
+    expect(page.items.length).toBe(3);
+  });
+
+  it('withConn：连接类错误重试一次成功；业务错误不重试', async () => {
+    const conn = makeImap();
+    let searches = 0;
+    const origSearch = conn.search.bind(conn);
+    (conn as unknown as { search: unknown }).search = async (folder: string, crit: unknown) => {
+      searches += 1;
+      if (searches === 1) throw new Error('Connection not available');
+      return origSearch(folder, crit);
+    };
+    const page = await makeMailbox(conn).envelopes('acc1', 'INBOX', { force: true });
+    expect(searches).toBe(2);
+    expect(page.items.length).toBe(3);
+
+    const biz = makeImap();
+    let calls = 0;
+    (biz as unknown as { search: unknown }).search = async () => { calls += 1; throw new Error("Mailbox doesn't exist: X"); };
+    await expect(makeMailbox(biz).envelopes('acc1', 'INBOX', { force: true })).rejects.toThrow('Mailbox');
+    expect(calls).toBe(1);
   });
 
   it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新；uid 降序分页', async () => {

@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { DatabaseSync } = require('node:sqlite');
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 const MAX_ITEMS = 500;
 
 const SCHEMA_V1 = `
@@ -29,6 +29,14 @@ CREATE TABLE envelope_cache (
 CREATE TABLE envelope_cache_meta (
   account_id TEXT NOT NULL, folder TEXT NOT NULL, saved_at INTEGER NOT NULL,
   PRIMARY KEY (account_id, folder)
+);
+`;
+
+const SCHEMA_V2 = `
+CREATE TABLE IF NOT EXISTS folder_cache (
+  account_id TEXT PRIMARY KEY NOT NULL,
+  payload_json TEXT NOT NULL,
+  saved_at INTEGER NOT NULL
 );
 `;
 
@@ -73,13 +81,25 @@ function createStore({ dataDir }) {
     db.exec('PRAGMA busy_timeout=5000');
     db.exec('PRAGMA synchronous=NORMAL');
     db.exec('PRAGMA foreign_keys=ON');
-    const version = Number(db.prepare('PRAGMA user_version').get().user_version ?? 0);
+    let version = Number(db.prepare('PRAGMA user_version').get().user_version ?? 0);
     if (version > SCHEMA_VERSION) throw new Error('数据文件由更新版本插件创建，请升级插件');
-    if (version < SCHEMA_VERSION) {
+    if (version < 1) {
       db.exec('BEGIN');
       try {
         db.exec(SCHEMA_V1);
-        db.exec(`PRAGMA user_version=${SCHEMA_VERSION}`);
+        db.exec('PRAGMA user_version=1');
+        db.exec('COMMIT');
+        version = 1;
+      } catch (err) {
+        db.exec('ROLLBACK');
+        throw err;
+      }
+    }
+    if (version < 2) {
+      db.exec('BEGIN');
+      try {
+        db.exec(SCHEMA_V2);
+        db.exec('PRAGMA user_version=2');
         db.exec('COMMIT');
       } catch (err) {
         db.exec('ROLLBACK');
@@ -175,6 +195,21 @@ function createStore({ dataDir }) {
         db.exec('ROLLBACK');
         throw err;
       }
+    },
+    readFoldersCache(accountId) {
+      const row = db.prepare('SELECT payload_json, saved_at FROM folder_cache WHERE account_id = ?').get(accountId);
+      if (!row) return null;
+      try {
+        return { value: JSON.parse(row.payload_json), savedAt: Number(row.saved_at) };
+      } catch {
+        return null;
+      }
+    },
+    writeFoldersCache(accountId, value) {
+      db.prepare(`
+        INSERT INTO folder_cache (account_id, payload_json, saved_at) VALUES (?, ?, ?)
+        ON CONFLICT(account_id) DO UPDATE SET payload_json = excluded.payload_json, saved_at = excluded.saved_at`)
+        .run(accountId, JSON.stringify(value), Date.now());
     },
     invalidateEnvelopes(accountId, folder) {
       db.exec('BEGIN');

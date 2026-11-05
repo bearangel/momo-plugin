@@ -40,12 +40,45 @@ describe('store', () => {
     store.close();
   });
 
-  it('user_version>1 → 中文错误（不静默重建）', () => {
+  it('user_version>2 → 中文错误（不静默重建）', () => {
     const file = path.join(dir, 'data.db');
     const db = new DatabaseSync(file);
-    db.exec('PRAGMA user_version=99');
+    db.exec('PRAGMA user_version=3');
     db.close();
     expect(() => createStore({ dataDir: dir })).toThrow('数据文件由更新版本插件创建');
+  });
+
+  it('v1 → v2 迁移：补建 folder_cache 并置 user_version=2', () => {
+    const first = createStore({ dataDir: dir });
+    first.close();
+    const file = path.join(dir, 'data.db');
+    const db = new DatabaseSync(file);
+    db.exec('DROP TABLE folder_cache');
+    db.exec('PRAGMA user_version=1');
+    db.close();
+    const store = createStore({ dataDir: dir });
+    expect(store.readFoldersCache('acc1')).toBeNull();
+    store.writeFoldersCache('acc1', { drafts: 'Drafts', sent: null });
+    expect(store.readFoldersCache('acc1')!.value).toEqual({ drafts: 'Drafts', sent: null });
+    const check = new DatabaseSync(file);
+    expect(check.prepare('PRAGMA user_version').get()!.user_version).toBe(2);
+    check.close();
+    store.close();
+  });
+
+  it('folder_cache：读写 + 损坏 payload 返回 null', () => {
+    const store = createStore({ dataDir: dir });
+    store.writeFoldersCache('acc1', { drafts: '草稿箱', sent: '已发送', unseen: { INBOX: 2 } });
+    const hit = store.readFoldersCache('acc1')!;
+    expect(hit.value.drafts).toBe('草稿箱');
+    expect(hit.savedAt).toBeGreaterThan(0);
+    store.close();
+    const db = new DatabaseSync(path.join(dir, 'data.db'));
+    db.prepare('UPDATE folder_cache SET payload_json = ? WHERE account_id = ?').run('{broken', 'acc1');
+    db.close();
+    const store2 = createStore({ dataDir: dir });
+    expect(store2.readFoldersCache('acc1')).toBeNull();
+    store2.close();
   });
 
   it('损坏 DB → 中文错误，不重建', () => {

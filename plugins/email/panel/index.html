@@ -63,6 +63,7 @@
       <input id="q" placeholder="搜索主题" style="flex:1" onkeydown="if(event.key==='Enter')reloadList()">
       <button onclick="reloadList(true)">刷新</button>
     </div>
+    <div id="sync-status" class="hint" style="padding:0 10px 4px;display:none"></div>
     <div id="maillist" style="flex:1;overflow:auto"></div>
     <div class="pager">
       <button onclick="turnPage(-1)">‹ 上一页</button>
@@ -144,7 +145,7 @@
   window.call = call;
 
   // 状态
-  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null, composeBusy: false, editId: null };
+  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null, composeBusy: false, editId: null, reqSeq: 0 };
   var PRESETS = {
     qq: { ih: 'imap.qq.com', ip: 993, it: 'tls', sh: 'smtp.qq.com', sp: 465, st: 'tls' },
     '163': { ih: 'imap.163.com', ip: 993, it: 'tls', sh: 'smtp.163.com', sp: 465, st: 'tls' },
@@ -232,7 +233,9 @@
     $('folders').innerHTML = h || '<p class="hint" style="padding:8px">尚未配置邮箱——点击「+ 添加账号」</p>';
   }
 
-  function renderList() {
+  function renderList(keepScroll) {
+    var box = $('maillist');
+    var keep = keepScroll ? box.scrollTop : 0;
     var h = '';
     S.mails.forEach(function (m) {
       var uid = Number(m.uid);
@@ -240,8 +243,22 @@
         '<div class="subj">' + esc(m.subject || '(无主题)') + '</div>' +
         '<div class="meta"><span>' + esc(m.from) + '</span><span>' + (m.hasAttachments ? '<span class="att">附件 </span>' : '') + esc((m.date || '').slice(0, 16).replace('T', ' ')) + '</span></div></div>';
     });
-    $('maillist').innerHTML = h || '<p class="hint" style="padding:10px">无邮件</p>';
+    box.innerHTML = h || '<p class="hint" style="padding:10px">无邮件</p>';
+    box.scrollTop = keep;
     $('pageinfo').textContent = S.page + ' / ' + Math.max(1, Math.ceil(S.total / S.pageSize)) + '（' + S.total + '）';
+  }
+
+  function setSyncStatus(text) {
+    var el = $('sync-status');
+    el.textContent = text || '';
+    el.style.display = text ? 'block' : 'none';
+  }
+
+  function currentFilter() {
+    var filter = {};
+    var q = $('q').value.trim();
+    if (q) filter.subject = q;
+    return filter;
   }
 
   function renderDraftBox() {
@@ -263,12 +280,28 @@
 
   function reloadList(force) {
     if (!S.accId) return;
-    var filter = {};
-    var q = $('q').value.trim();
-    if (q) filter.subject = q;
-    call(force ? 'mails.refresh' : 'mails.list', { accountId: S.accId, folder: S.folder, page: S.page, pageSize: S.pageSize, filter: filter })
-      .then(function (p) { S.mails = p.items || []; S.total = p.total || 0; renderList(); if (!force) renderDraftBox(); })
-      .catch(function (e) { showListError(e.message); });
+    var filter = currentFilter();
+    var seq = ++S.reqSeq;
+    var accId = S.accId, folder = S.folder, page = S.page, pageSize = S.pageSize;
+    var same = function () { return seq === S.reqSeq && S.accId === accId && S.folder === folder && S.page === page; };
+    var apply = function (p) { S.mails = p.items || []; S.total = p.total || 0; };
+    setSyncStatus('更新中…');
+    if (force) {
+      call('mails.refresh', { accountId: accId, folder: folder, page: page, pageSize: pageSize, filter: filter })
+        .then(function (p) { if (!same()) return; apply(p); renderList(false); renderDraftBox(); setSyncStatus(''); })
+        .catch(function () { if (same()) setSyncStatus('离线：显示上次数据'); });
+      return;
+    }
+    call('mails.peek', { accountId: accId, folder: folder, page: page, pageSize: pageSize })
+      .catch(function () { return { items: [], total: 0 }; })
+      .then(function (peek) {
+        if (!same()) return;
+        // 无本地缓存时保留旧列表（避免定时刷新闪空），后台结果再替换。
+        if ((peek.items && peek.items.length) || !S.mails.length) { apply(peek); renderList(true); }
+        return call('mails.list', { accountId: accId, folder: folder, page: page, pageSize: pageSize, filter: filter })
+          .then(function (p) { if (!same()) return; apply(p); renderList(true); renderDraftBox(); setSyncStatus(''); })
+          .catch(function () { if (same()) setSyncStatus('离线：显示上次数据'); });
+      });
   }
 
   // HTML 邮件内层文档：默认禁远程资源（跟踪像素/外链字体/CSS）；用户可一键放行图片。
@@ -306,7 +339,7 @@
     S.selUid = uid;
     S.showRemoteImages = false;
     S.curMail = null;
-    renderList();
+    renderList(true);
     $('reader').innerHTML = '<p class="hint" style="padding:14px">读取中…</p>';
     call('mails.get', { accountId: S.accId, folder: S.folder, uid: uid }).then(function (m) {
       S.curMail = m;
@@ -500,20 +533,60 @@
   function pickAccount(id) {
     cancelConfirm();
     S.accId = id; S.folder = 'INBOX'; S.page = 1;
-    // 并发拉取：文件夹树与首屏列表互不依赖，切账号不再串行等两次 RPC。
+    var seq = ++S.reqSeq;
+    var same = function () { return seq === S.reqSeq && S.accId === id && S.folder === 'INBOX'; };
+    setSyncStatus('更新中…');
+    // 两阶段：peek 本地（内存/DB）秒开 → 后台 list/refresh 静默替换。
     Promise.all([
-      call('folders.list', { accountId: id }),
-      call('mails.list', { accountId: id, folder: 'INBOX', page: 1, pageSize: S.pageSize, filter: {} }),
+      call('folders.peek', { accountId: id }).catch(function () { return { value: null }; }),
+      call('mails.peek', { accountId: id, folder: 'INBOX', page: 1, pageSize: S.pageSize }).catch(function () { return { items: [], total: 0 }; }),
     ]).then(function (r) {
-      S.folders = r[0];
-      S.mails = r[1].items || [];
-      S.total = r[1].total || 0;
+      if (!same()) return;
+      S.folders = (r[0] && r[0].value) || null;
+      S.mails = (r[1] && r[1].items) || [];
+      S.total = (r[1] && r[1].total) || 0;
       renderAccounts();
-      renderList();
-      renderDraftBox();
-    }).catch(function (e) { showListError('文件夹列表加载失败：' + e.message); });
+      renderList(false);
+      return Promise.allSettled([
+        call('folders.list', { accountId: id }),
+        call('mails.refresh', { accountId: id, folder: 'INBOX', page: 1, pageSize: S.pageSize, filter: {} }),
+      ]).then(function (res) {
+        if (!same()) return;
+        var okF = res[0].status === 'fulfilled';
+        var okM = res[1].status === 'fulfilled';
+        if (okF) S.folders = res[0].value;
+        if (okM) { S.mails = res[1].value.items || []; S.total = res[1].value.total || 0; }
+        if (okF) renderAccounts();
+        if (okM) renderList(true);
+        setSyncStatus(okF && okM ? '' : '离线：显示上次数据');
+      });
+    });
   }
-  function pickFolder(p) { S.folder = p; S.page = 1; renderAccounts(); reloadList(); }
+  function pickFolder(p) {
+    S.folder = p; S.page = 1;
+    renderAccounts();
+    if (!S.accId) return;
+    var seq = ++S.reqSeq;
+    var accId = S.accId;
+    var same = function () { return seq === S.reqSeq && S.accId === accId && S.folder === p; };
+    setSyncStatus('更新中…');
+    call('mails.peek', { accountId: accId, folder: p, page: 1, pageSize: S.pageSize })
+      .catch(function () { return { items: [], total: 0 }; })
+      .then(function (peek) {
+        if (!same()) return;
+        S.mails = (peek && peek.items) || [];
+        S.total = (peek && peek.total) || 0;
+        renderList(false);
+        renderDraftBox();
+        return call('mails.refresh', { accountId: accId, folder: p, page: 1, pageSize: S.pageSize, filter: currentFilter() })
+          .then(function (page) {
+            if (!same()) return;
+            S.mails = page.items || []; S.total = page.total || 0;
+            renderList(true); renderDraftBox(); setSyncStatus('');
+          })
+          .catch(function () { if (same()) setSyncStatus('离线：显示上次数据'); });
+      });
+  }
   function turnPage(d) { S.page = Math.max(1, S.page + d); reloadList(); }
 
   function boot() {

@@ -49,20 +49,48 @@ function findFolders(raw, specialUse, names) {
   return out;
 }
 
-function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutMs = 30000 }) {
+function createMailbox({ accountStore, cache, imapConnect, parseMail, store, opTimeoutMs = 30000 }) {
   const conns = new Map(); // accountId → { conn, lastUsed }
   const readCache = new Map(); // `${accountId}|${folder}|${uid}` → read 结果（Map 迭代序即 LRU 序）
 
+  async function dropConn(accountId) {
+    const hit = conns.get(accountId);
+    conns.delete(accountId);
+    if (hit) await hit.conn.close().catch(() => undefined);
+  }
+
   async function connOf(accountId) {
     const hit = conns.get(accountId);
-    if (hit && Date.now() - hit.lastUsed < IDLE_MS) { hit.lastUsed = Date.now(); return hit.conn; }
-    if (hit) { await hit.conn.close().catch(() => undefined); conns.delete(accountId); }
+    if (hit && Date.now() - hit.lastUsed < IDLE_MS) {
+      // 连接自愈：adapter 报告不可用（socket 已断/服务端关闭）→ 丢弃重建。
+      if (typeof hit.conn.usable === 'function' && hit.conn.usable() === false) {
+        await dropConn(accountId);
+      } else {
+        hit.lastUsed = Date.now();
+        return hit.conn;
+      }
+    } else if (hit) {
+      await dropConn(accountId);
+    }
     const acc = await accountStore.get(accountId);
     if (!acc) throw new Error(`账号不存在: ${accountId}`);
     const pw = await accountStore.getPassword(accountId);
     const conn = await imapConnect(acc, pw);
     conns.set(accountId, { conn, lastUsed: Date.now() });
     return conn;
+  }
+
+  // 连接类错误（可重试一次）；业务错误（认证/邮件不存在等）原样抛。
+  const CONN_ERROR_RE = /Connection not available|Not connected|Connection closed|ECONNRESET|socket/i;
+  async function withConn(accountId, fn) {
+    const conn = await connOf(accountId);
+    try {
+      return await fn(conn);
+    } catch (err) {
+      if (!CONN_ERROR_RE.test(String((err && err.message) || err))) throw err;
+      await dropConn(accountId);
+      return fn(await connOf(accountId));
+    }
   }
   // 超时守卫：操作落定即清计时器——裸 Promise.race 会在竞速失败侧遗留 reject，形成 unhandled rejection。
   const withTimeout = (label, p, ms = opTimeoutMs) => new Promise((resolve, reject) => {
@@ -87,13 +115,13 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
   const foldersCache = new Map(); // accountId → { value, at }
 
   // 按序探测候选：编码路径失败时回退解码路径（新浪 status 只认解码后的真实目录名）。
-  async function resolveFolder(conn, candidates, unseen) {
+  async function resolveFolder(accountId, candidates, unseen) {
     for (const path of candidates) {
       const decoded = decodePath(path);
       const trials = decoded === path ? [path] : [path, decoded];
       for (const trial of trials) {
         try {
-          const st = await withTimeout('status', conn.status(trial));
+          const st = await withConn(accountId, (conn) => withTimeout('status', conn.status(trial)));
           unseen[trial] = Number(st?.unseen ?? 0);
           return trial;
         } catch {
@@ -105,16 +133,17 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
   }
 
   async function probeFolders(accountId) {
-    const conn = await connOf(accountId);
-    const raw = await withTimeout('list', conn.list());
+    const raw = await withConn(accountId, (conn) => withTimeout('list', conn.list()));
     const unseen = {};
     // status 一律 best-effort：目录名猜错（尤其 modified-UTF-7 的垃圾路径）不得让整个列表失败
     const [drafts, sent] = await Promise.all([
-      resolveFolder(conn, findFolders(raw, '\\Drafts', DRAFT_NAMES), unseen),
-      resolveFolder(conn, findFolders(raw, '\\Sent', SENT_NAMES), unseen),
-      resolveFolder(conn, ['INBOX'], unseen),
+      resolveFolder(accountId, findFolders(raw, '\\Drafts', DRAFT_NAMES), unseen),
+      resolveFolder(accountId, findFolders(raw, '\\Sent', SENT_NAMES), unseen),
+      resolveFolder(accountId, ['INBOX'], unseen),
     ]).then(([d, s]) => [d, s]);
-    return { all: raw, drafts, sent, unseen };
+    const value = { all: raw, drafts, sent, unseen };
+    try { store?.writeFoldersCache?.(accountId, value); } catch { /* 落库失败不影响在线结果 */ }
+    return value;
   }
 
   async function foldersImpl(accountId) {
@@ -125,13 +154,29 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     return value;
   }
 
+  function localFolders(accountId) {
+    const mem = foldersCache.get(accountId);
+    if (mem) return mem.value;
+    const hit = store?.readFoldersCache?.(accountId);
+    return hit ? hit.value : null;
+  }
+
+  async function foldersPeek(accountId) {
+    const mem = foldersCache.get(accountId);
+    if (mem) return { value: mem.value, savedAt: mem.at };
+    const hit = store?.readFoldersCache?.(accountId);
+    if (hit) return { value: hit.value, savedAt: hit.savedAt };
+    return { value: null, savedAt: null };
+  }
+
   // 保留策略：只作用于本地缓存；Sent 永久；sent 探测失败/找不到 → 不清理（fail-safe）。
-  async function retentionCutoff(accountId, folder) {
+  async function retentionCutoff(accountId, folder, { localOnly = false } = {}) {
     const acc = await accountStore.get(accountId);
     const retention = (acc && acc.retention) || 'forever';
     if (retention === 'forever') return null;
     try {
-      const sent = (await foldersImpl(accountId)).sent;
+      const folders = localOnly ? localFolders(accountId) : await foldersImpl(accountId);
+      const sent = folders && folders.sent;
       if (!sent || folder === sent) return null;
       const days = RETENTION_DAYS[retention];
       return days ? Date.now() - days * 86400000 : null;
@@ -139,6 +184,11 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
       return null;
     }
   }
+
+  const fetchEnvelopesNow = (accountId, folder, crit) => withConn(accountId, async (conn) => {
+    const uids = await withTimeout('search', conn.search(folder, crit));
+    return withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
+  });
 
   async function envelopesImpl(accountId, folder, { page = 1, pageSize = 20, filter, force = false } = {}) {
     const size = Math.min(Math.max(Math.trunc(pageSize) || 20, 1), 50);
@@ -154,9 +204,7 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     const cutoffMs = await retentionCutoff(accountId, folder);
     let list;
     if (force || hasFilter) {
-      const conn = await connOf(accountId);
-      const uids = await withTimeout('search', conn.search(folder, crit));
-      list = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
+      list = await fetchEnvelopesNow(accountId, folder, crit);
       // 仅无过滤全量才落缓存——带 filter 的直拉结果写入共享槽会污染 5min TTL 内的无 filter 查询（2026-11-05 修复）。
       if (!hasFilter) cache.write(accountId, folder, list, { cutoffMs });
     } else {
@@ -164,9 +212,7 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
       if (cached && Date.now() - cached.savedAt < CACHE_TTL_MS) {
         list = cached.items;
       } else {
-        const conn = await connOf(accountId);
-        const uids = await withTimeout('search', conn.search(folder, {}));
-        list = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
+        list = await fetchEnvelopesNow(accountId, folder, {});
         cache.write(accountId, folder, list, { cutoffMs });
       }
     }
@@ -183,15 +229,16 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     const key = `${accountId}|${folder}|${uid}`;
     const cached = readCacheGet(key);
     if (cached) return cached;
-    const conn = await connOf(accountId);
-    const uids = await withTimeout('search', conn.search(folder, {}));
-    const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
-    const env = envs.find((e) => e.uid === uid);
-    if (!env) throw new Error(`邮件不存在（folder=${folder} uid=${uid}）`);
-    if ((env.size || 0) > READ_SOURCE_MAX) {
-      throw new Error(`邮件体积 ${(env.size / 1048576).toFixed(1)}MB 超过 2MB 读取上限——附件请用 save_attachment`);
-    }
-    const source = await withTimeout('source', conn.fetchSource(folder, uid));
+    const { env, source } = await withConn(accountId, async (conn) => {
+      const uids = await withTimeout('search', conn.search(folder, {}));
+      const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
+      const hit = envs.find((e) => e.uid === uid);
+      if (!hit) throw new Error(`邮件不存在（folder=${folder} uid=${uid}）`);
+      if ((hit.size || 0) > READ_SOURCE_MAX) {
+        throw new Error(`邮件体积 ${(hit.size / 1048576).toFixed(1)}MB 超过 2MB 读取上限——附件请用 save_attachment`);
+      }
+      return { env: hit, source: await withTimeout('source', conn.fetchSource(folder, uid)) };
+    });
     const parsed = await parseMail(source);
     const text = String(parsed.text || '');
     const textTruncated = text.length > TEXT_TRUNCATE;
@@ -211,14 +258,15 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
   }
 
   async function attachmentImpl(accountId, folder, uid, partId) {
-    const conn = await connOf(accountId);
-    const uids = await withTimeout('search', conn.search(folder, {}));
-    const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
-    const env = envs.find((e) => e.uid === uid);
-    if (env && (env.size || 0) > ATTACH_MAX) {
-      throw new Error(`附件载体超过 10MB 上限（邮件 ${(env.size / 1048576).toFixed(1)}MB）`);
-    }
-    const source = await withTimeout('source', conn.fetchSource(folder, uid));
+    const source = await withConn(accountId, async (conn) => {
+      const uids = await withTimeout('search', conn.search(folder, {}));
+      const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
+      const env = envs.find((e) => e.uid === uid);
+      if (env && (env.size || 0) > ATTACH_MAX) {
+        throw new Error(`附件载体超过 10MB 上限（邮件 ${(env.size / 1048576).toFixed(1)}MB）`);
+      }
+      return withTimeout('source', conn.fetchSource(folder, uid));
+    });
     const parsed = await parseMail(source);
     const att = (parsed.attachments || []).find((a) => a.partId === partId);
     if (!att) throw new Error(`附件不存在: partId=${partId}`);
@@ -240,23 +288,32 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
       return folder;
     },
     async sentFolder(accountId) { return (await foldersImpl(accountId)).sent; },
+    foldersPeek,
+    // 本地优先读取：不触 IMAP、忽略 TTL；无缓存返回空页。
+    async envelopesPeek(accountId, folder, { page = 1, pageSize = 20 } = {}) {
+      const size = Math.min(Math.max(Math.trunc(pageSize) || 20, 1), 50);
+      const cur = Math.max(Math.trunc(page) || 1, 1);
+      const cached = cache.read(accountId, folder);
+      if (!cached) return { items: [], total: 0, page: cur, pageSize: size, savedAt: null };
+      const cutoffMs = await retentionCutoff(accountId, folder, { localOnly: true });
+      const sorted = [...filterByAge(cached.items, cutoffMs)].sort((a, b) => b.uid - a.uid);
+      const start = (cur - 1) * size;
+      return { items: sorted.slice(start, start + size), total: sorted.length, page: cur, pageSize: size, savedAt: cached.savedAt };
+    },
     // 单次 service 调用总预算：整条链（选箱/search/fetch/parse）受 opTimeoutMs 约束，内部单操作超时保留。
     envelopes: (accountId, folder, opts) => withTimeout('列表', envelopesImpl(accountId, folder, opts)),
     read: (accountId, folder, uid) => withTimeout('读信', readImpl(accountId, folder, uid)),
     attachment: (accountId, folder, uid, partId) => withTimeout('取附件', attachmentImpl(accountId, folder, uid, partId)),
     async append(accountId, folder, raw) {
-      const conn = await connOf(accountId);
-      return withTimeout('append', conn.append(folder, raw));
+      return withConn(accountId, (conn) => withTimeout('append', conn.append(folder, raw)));
     },
     // APPEND 响应可能不含 uid（QQ 实测只有 {destination,path}）——按报文内嵌标记反查，取最新（最大）uid。
     async resolveAppendedUid(accountId, folder, draftId) {
-      const conn = await connOf(accountId);
-      const uids = await withTimeout('定位草稿', conn.search(folder, { header: { 'X-Momo-Draft-Id': draftId } }));
+      const uids = await withConn(accountId, (conn) => withTimeout('定位草稿', conn.search(folder, { header: { 'X-Momo-Draft-Id': draftId } })));
       return (uids || []).reduce((max, u) => (Number(u) > max ? Number(u) : max), 0);
     },
     async deleteMessage(accountId, folder, uid) {
-      const conn = await connOf(accountId);
-      return withTimeout('delete', conn.deleteMessage(folder, uid));
+      return withConn(accountId, (conn) => withTimeout('delete', conn.deleteMessage(folder, uid)));
     },
     async closeAll() {
       for (const { conn } of conns.values()) await conn.close().catch(() => undefined);
