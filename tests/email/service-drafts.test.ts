@@ -14,6 +14,8 @@ function makeHarness(over: {
   smtpSend?: (accId: string, raw: Buffer, envelope: unknown) => Promise<void>;
   append?: (accId: string, folder: string, raw: Buffer) => Promise<number>;
   resolveAppendedUid?: (accId: string, folder: string, draftId: string) => Promise<number>;
+  sentFolder?: () => Promise<string | null>;
+  draftsFolder?: () => Promise<string>;
 } = {}) {
   const appended: Array<{ folder: string; raw: Buffer }> = [];
   const deleted: Array<{ folder: string; uid: number }> = [];
@@ -21,8 +23,8 @@ function makeHarness(over: {
   let sentEnv: unknown = null;
   let sentRaw: Buffer | null = null;
   const mailbox = {
-    draftsFolder: async () => 'Drafts',
-    sentFolder: async () => 'Sent',
+    draftsFolder: over.draftsFolder ?? (async () => 'Drafts'),
+    sentFolder: over.sentFolder ?? (async () => 'Sent'),
     append: over.append ?? (async (_acc: string, folder: string, raw: Buffer) => { appended.push({ folder, raw }); return 100 + appended.length; }),
     deleteMessage: async (_acc: string, folder: string, uid: number) => { deleted.push({ folder, uid }); },
     resolveAppendedUid: over.resolveAppendedUid ?? (async () => 0),
@@ -97,6 +99,31 @@ describe('drafts state machine', () => {
     expect(sent.archiveWarning).toContain('已发送');
     expect(sent.deleteWarning).toBeNull();
     expect(JSON.stringify(sent)).not.toContain('可重试');
+  });
+
+  it('send：sentFolder=null → 不 APPEND，sent + archiveWarning（不视为失败）', async () => {
+    const h = makeHarness({ sentFolder: async () => null });
+    const d = await h.drafts.save(INPUT);
+    const sent = await h.drafts.send(d.id);
+    expect(sent.status).toBe('sent');
+    expect(sent.archiveWarning).toContain('未能识别');
+    expect(h.appended.map((a) => a.folder)).toEqual(['Drafts']);
+  });
+
+  it('discard：draftsFolder 抛错 → 仍 discarded + deleteWarning', async () => {
+    let saves = 0;
+    const h = makeHarness({
+      draftsFolder: async () => {
+        saves += 1;
+        if (saves === 1) return 'Drafts';
+        throw new Error('未能识别该邮箱的草稿箱文件夹');
+      },
+    });
+    const d = await h.drafts.save(INPUT);
+    await h.drafts.discard(d.id);
+    const rec = await h.drafts.get(d.id);
+    expect(rec!.status).toBe('discarded');
+    expect(rec!.deleteWarning).toContain('未能识别草稿箱');
   });
 
   it('discard：uid=0 且反查失败 → 状态 discarded + deleteWarning', async () => {

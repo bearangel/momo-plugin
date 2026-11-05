@@ -198,8 +198,15 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
     // list + 3×status 在同一连接上串行（≈4 RTT），整链同样受单次调用总预算约束。
     folders: (accountId) => withTimeout('文件夹列表', foldersImpl(accountId)),
     invalidateFolders(accountId) { foldersCache.delete(accountId); },
-    async draftsFolder(accountId) { return (await foldersImpl(accountId)).drafts ?? 'INBOX'; },
-    async sentFolder(accountId) { return (await foldersImpl(accountId)).sent ?? 'INBOX'; },
+    // 草稿箱识别失败必须失败退出：回退 INBOX 会把草稿写进收件箱（比失败更糟）。
+    async draftsFolder(accountId) {
+      const folder = (await foldersImpl(accountId)).drafts;
+      if (!folder) {
+        throw new Error('未能识别该邮箱的草稿箱文件夹（服务商目录名非标准）。请在面板确认邮箱文件夹，或改用 INBOX 中手动起草。');
+      }
+      return folder;
+    },
+    async sentFolder(accountId) { return (await foldersImpl(accountId)).sent; },
     // 单次 service 调用总预算：整条链（选箱/search/fetch/parse）受 opTimeoutMs 约束，内部单操作超时保留。
     envelopes: (accountId, folder, opts) => withTimeout('列表', envelopesImpl(accountId, folder, opts)),
     read: (accountId, folder, uid) => withTimeout('读信', readImpl(accountId, folder, uid)),

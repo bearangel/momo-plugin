@@ -137,10 +137,14 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
         }
         // ——— 此线以下邮件已物理发出：一切失败不得再产生「可重试」语义（I-1）———
         let archiveWarning = null;
-        try {
-          await mailbox.append(rec.accountId, sent, raw);
-        } catch {
-          archiveWarning = ARCHIVE_WARNING;
+        if (!sent) {
+          archiveWarning = '未能识别「已发送」文件夹，邮件已发出但未归档';
+        } else {
+          try {
+            await mailbox.append(rec.accountId, sent, raw);
+          } catch {
+            archiveWarning = ARCHIVE_WARNING;
+          }
         }
         let deleteWarning = null;
         let delUid = Number(rec.uid) || 0;
@@ -174,17 +178,24 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
       if (rec.status === 'sent') return; // M-1 终态不可越：已发送记录不删信不再改状态
       let deleteWarning = null;
       if (rec.status === 'pending') {
-        const folder = await mailbox.draftsFolder(rec.accountId);
+        let folder = null;
+        try {
+          folder = await mailbox.draftsFolder(rec.accountId);
+        } catch {
+          deleteWarning = '未能识别草稿箱，草稿副本可能残留';
+        }
         let delUid = Number(rec.uid) || 0;
-        if (!delUid) delUid = await resolveUid(rec.accountId, folder, rec.id);
-        if (delUid) {
-          try {
-            await mailbox.deleteMessage(rec.accountId, folder, delUid);
-          } catch {
+        if (folder) {
+          if (!delUid) delUid = await resolveUid(rec.accountId, folder, rec.id);
+          if (delUid) {
+            try {
+              await mailbox.deleteMessage(rec.accountId, folder, delUid);
+            } catch {
+              deleteWarning = '已放弃，但草稿箱副本未能删除';
+            }
+          } else {
             deleteWarning = '已放弃，但草稿箱副本未能删除';
           }
-        } else {
-          deleteWarning = '已放弃，但草稿箱副本未能删除';
         }
       }
       patch(id, (r) => ({ ...r, status: 'discarded', ...(deleteWarning ? { deleteWarning } : {}) }));

@@ -171,6 +171,16 @@ describe('mailbox', () => {
     expect(findFolders(raw, '\\Drafts', ['草稿夹'])).toEqual(['&YhF2hJHNiYFlh072-/草稿夹']);
   });
 
+  it('draftsFolder：识别不到必须抛错，绝不回退 INBOX', async () => {
+    const conn = makeImap({ list: [{ path: 'INBOX', specialUse: '\\Inbox' }] });
+    await expect(makeMailbox(conn).draftsFolder('acc1')).rejects.toThrow('未能识别');
+  });
+
+  it('sentFolder：识别不到返回 null（不回退 INBOX）', async () => {
+    const conn = makeImap({ list: [{ path: 'INBOX', specialUse: '\\Inbox' }] });
+    await expect(makeMailbox(conn).sentFolder('acc1')).resolves.toBeNull();
+  });
+
   it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新；uid 降序分页', async () => {
     const conn = makeImap();
     const mb = makeMailbox(conn);
