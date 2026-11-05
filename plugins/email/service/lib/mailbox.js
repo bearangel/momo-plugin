@@ -14,20 +14,24 @@ const FOLDERS_TTL_MS = 60 * 1000;           // 文件夹树缓存（切账号体
 
 // 兜底名匹配统一走 norm（去空白+小写），故常量表预先归一——'Sent Items' 归一后是 'sentitems'。
 const norm = (s) => String(s || '').toLowerCase().replace(/\s/g, '');
-const DRAFT_NAMES = ['drafts', '草稿箱', '草稿', 'draft'].map(norm);
-const SENT_NAMES = ['sent', '已发送', '已发送邮件', '发件箱', 'sent messages', 'sent items'].map(norm);
+const DRAFT_NAMES = ['drafts', '草稿箱', '草稿', '草稿夹', '草稿邮件', 'draft'].map(norm);
+const SENT_NAMES = ['sent', '已发送', '已发送邮件', '已发送邮件箱', '发件箱', 'sent messages', 'sent items'].map(norm);
 
-function findFolder(raw, specialUse, names) {
-  const special = raw.find((f) => f.specialUse === specialUse);
-  if (special) return special.path;
-  // path/name 的原样 + modified-UTF-7 解码 + 末段（新浪等以编码父路径出现）都要比对
+function decodePath(p) { return String(p).split('/').map(decodeModifiedUtf7).join('/'); }
+
+// 候选多选：specialUse 命中优先，其后是名称命中（原样/解码/末段）；去重保序供逐个探测。
+function findFolders(raw, specialUse, names) {
+  const out = [];
+  const push = (p) => { if (typeof p === 'string' && p && !out.includes(p)) out.push(p); };
+  for (const f of raw) if (f.specialUse === specialUse) push(f.path);
   const variants = (f) => [f.path, f.name]
     .filter((v) => typeof v === 'string')
     .flatMap((v) => {
       const d = decodeModifiedUtf7(v);
       return [norm(v), norm(d), norm(v.split('/').pop()), norm(d.split('/').pop())];
     });
-  return raw.find((f) => variants(f).some((v) => names.includes(v)))?.path ?? null;
+  for (const f of raw) if (variants(f).some((v) => names.includes(v))) push(f.path);
+  return out;
 }
 
 function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutMs = 30000 }) {
@@ -67,29 +71,35 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
 
   const foldersCache = new Map(); // accountId → { value, at }
 
+  // 按序探测候选：编码路径失败时回退解码路径（新浪 status 只认解码后的真实目录名）。
+  async function resolveFolder(conn, candidates, unseen) {
+    for (const path of candidates) {
+      const decoded = decodePath(path);
+      const trials = decoded === path ? [path] : [path, decoded];
+      for (const trial of trials) {
+        try {
+          const st = await withTimeout('status', conn.status(trial));
+          unseen[trial] = Number(st?.unseen ?? 0);
+          return trial;
+        } catch {
+          unseen[trial] = 0;
+        }
+      }
+    }
+    return null;
+  }
+
   async function probeFolders(accountId) {
     const conn = await connOf(accountId);
     const raw = await withTimeout('list', conn.list());
-    const draftsCand = findFolder(raw, '\\Drafts', DRAFT_NAMES);
-    const sentCand = findFolder(raw, '\\Sent', SENT_NAMES);
     const unseen = {};
     // status 一律 best-effort：目录名猜错（尤其 modified-UTF-7 的垃圾路径）不得让整个列表失败
-    const statusOf = async (path) => {
-      try {
-        const st = await withTimeout('status', conn.status(path));
-        unseen[path] = Number(st?.unseen ?? 0);
-        return true;
-      } catch {
-        unseen[path] = 0;
-        return false;
-      }
-    };
-    const [, draftsOk, sentOk] = await Promise.all([
-      statusOf('INBOX'),
-      draftsCand ? statusOf(draftsCand) : Promise.resolve(false),
-      sentCand ? statusOf(sentCand) : Promise.resolve(false),
-    ]);
-    return { all: raw, drafts: draftsOk ? draftsCand : null, sent: sentOk ? sentCand : null, unseen };
+    const [drafts, sent] = await Promise.all([
+      resolveFolder(conn, findFolders(raw, '\\Drafts', DRAFT_NAMES), unseen),
+      resolveFolder(conn, findFolders(raw, '\\Sent', SENT_NAMES), unseen),
+      resolveFolder(conn, ['INBOX'], unseen),
+    ]).then(([d, s]) => [d, s]);
+    return { all: raw, drafts, sent, unseen };
   }
 
   async function foldersImpl(accountId) {
@@ -216,4 +226,4 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutM
   };
 }
 
-module.exports = { createMailbox, CACHE_TTL_MS, FOLDERS_TTL_MS };
+module.exports = { createMailbox, findFolders, CACHE_TTL_MS, FOLDERS_TTL_MS };

@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
-import { createMailbox, CACHE_TTL_MS } from '../../plugins/email/service/lib/mailbox';
+import { createMailbox, findFolders, CACHE_TTL_MS } from '../../plugins/email/service/lib/mailbox';
 import { createEnvelopeCache } from '../../plugins/email/service/lib/envelope-cache';
 
 let dir: string;
@@ -103,16 +103,72 @@ describe('mailbox', () => {
     expect(f.drafts).toBe('草稿箱');
   });
 
-  it('folders：modified-UTF-7 名称匹配（新浪路径），status 失败则 sent=null', async () => {
+  it('folders：modified-UTF-7 名称匹配（新浪路径），全候选失败则 sent=null', async () => {
     const path = '&YhF2hJHNiYFlh072-/已发送';
     const ok = makeImap({ list: [{ path: 'INBOX' }, { path }] });
     expect((await makeMailbox(ok).folders('acc1')).sent).toBe(path);
     const broken = makeImap({ list: [{ path: 'INBOX' }, { path }] });
     (broken as unknown as { status: unknown }).status = async (p: string) => {
-      if (p === path) throw new Error("Mailbox doesn't exist");
-      return { unseen: 0 };
+      throw new Error(`Mailbox doesn't exist: ${p}`);
     };
     expect((await makeMailbox(broken).folders('acc1')).sent).toBeNull();
+  });
+
+  it('新浪实景：编码父段路径 + status 只认解码路径 → sent/drafts 用 workingPath', async () => {
+    const P = '&YhF2hJHNiYFlh072-';
+    const list = [
+      { path: 'INBOX', specialUse: '\\Inbox' },
+      { path: `${P}/已发送`, specialUse: '\\Sent' },
+      { path: `${P}/草稿夹` },
+      { path: `${P}/垃圾邮件` },
+      { path: `${P}/广告邮件` },
+      { path: `${P}/订阅邮件` },
+      { path: `${P}/重要邮件` },
+      { path: `${P}/其他邮件` },
+      { path: `${P}/回收站` },
+      { path: `${P}/病毒邮件` },
+      { path: `${P}/自定义文件夹` },
+    ];
+    const conn = makeImap({ list });
+    (conn as unknown as { status: unknown }).status = async (p: string) => {
+      if (p.includes(P)) throw new Error(`Mailbox doesn't exist: ${p}`);
+      return { unseen: 1 };
+    };
+    const f = await makeMailbox(conn).folders('acc1');
+    expect(f.sent).toBe('我的重要文件/已发送');
+    expect(f.drafts).toBe('我的重要文件/草稿夹');
+    expect(f.unseen['我的重要文件/已发送']).toBe(1);
+    expect(f.unseen['我的重要文件/草稿夹']).toBe(1);
+    expect(f.all).toHaveLength(11);
+  });
+
+  it('新浪实景：全部候选失败 → sent/drafts null 且 folders() 不抛', async () => {
+    const P = '&YhF2hJHNiYFlh072-';
+    const conn = makeImap({ list: [
+      { path: 'INBOX', specialUse: '\\Inbox' },
+      { path: `${P}/已发送`, specialUse: '\\Sent' },
+      { path: `${P}/草稿夹` },
+    ] });
+    (conn as unknown as { status: unknown }).status = async (p: string) => {
+      throw new Error(`Mailbox doesn't exist: ${p}`);
+    };
+    const f = await makeMailbox(conn).folders('acc1');
+    expect(f.sent).toBeNull();
+    expect(f.drafts).toBeNull();
+  });
+
+  it('findFolders：specialUse 优先、去重、名称命中补位', () => {
+    const raw = [
+      { path: 'B/已发送' },
+      { path: 'A/已发送', specialUse: '\\Sent' },
+      { path: 'A/已发送' },
+    ];
+    expect(findFolders(raw, '\\Sent', ['已发送'])).toEqual(['A/已发送', 'B/已发送']);
+  });
+
+  it('findFolders：末段解码命中（草稿夹）', () => {
+    const raw = [{ path: '&YhF2hJHNiYFlh072-/草稿夹' }];
+    expect(findFolders(raw, '\\Drafts', ['草稿夹'])).toEqual(['&YhF2hJHNiYFlh072-/草稿夹']);
   });
 
   it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新；uid 降序分页', async () => {
