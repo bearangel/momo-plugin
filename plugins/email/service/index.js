@@ -32,6 +32,12 @@ function smtpTransportOf(nodemailerLib, acc, pw) {
 }
 
 /** ImapFlow → mailbox adapter 契约 */
+// 部分服务商（新浪等）把 modified-UTF-7 编码的普通文件夹名当 NAMESPACE prefix，
+// imapflow 会据此把每个路径拼成不存在的层级——含 '&' 的前缀一律按无前缀处理。
+function shouldResetNamespace(prefix) {
+  return typeof prefix === 'string' && prefix.includes('&');
+}
+
 function imapAdapterFor(ImapFlow) {
   return async (account, password) => {
     const secure = account.imap.tlsMode === 'tls';
@@ -42,6 +48,9 @@ function imapAdapterFor(ImapFlow) {
       logger: false,
     });
     await client.connect();
+    if (client.namespace && shouldResetNamespace(client.namespace.prefix)) {
+      client.namespace = { prefix: '', delimiter: client.namespace.delimiter || '/' };
+    }
     // 选箱纪律：ImapFlow 在未选箱（this.mailbox === false）时 search/fetch/fetchOne 直接空返回，
     // 且 folder 不是这些方法的合法参数（会被静默忽略）——每次按 folder 操作必须显式取锁选箱。
     const withMailbox = async (folder, fn) => {
@@ -237,3 +246,4 @@ module.exports.createService = function createService(ctx) {
   };
 };
 module.exports.buildService = buildService;
+module.exports.shouldResetNamespace = shouldResetNamespace;

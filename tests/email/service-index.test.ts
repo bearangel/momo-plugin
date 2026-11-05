@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, afterEach, describe, expect, it } from 'vitest';
-import { buildService } from '../../plugins/email/service/index';
+import { buildService, shouldResetNamespace } from '../../plugins/email/service/index';
 
 let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-svc-')); });
@@ -17,10 +17,15 @@ class FakeImapFlow {
   selectedFolder: string | null = null;
   openedFolders: string[] = [];
   lastSearch: unknown = null;
+  namespace: { prefix: string; delimiter: string } = { prefix: '', delimiter: '/' };
   constructor(opts: unknown) { this.opts = opts; }
   async connect() {}
   async logout() {}
-  async list() { return [{ path: 'INBOX', specialUse: '\\Inbox' }, { path: 'Drafts', specialUse: '\\Drafts' }, { path: 'Sent', specialUse: '\\Sent' }]; }
+  async list() {
+    const base = [{ path: 'INBOX', specialUse: '\\Inbox' }, { path: 'Drafts', specialUse: '\\Drafts' }, { path: 'Sent', specialUse: '\\Sent' }];
+    const prefix = this.namespace.prefix;
+    return prefix ? base.map((f) => ({ ...f, path: f.path === 'INBOX' ? 'INBOX' : prefix + f.path })) : base;
+  }
   async getMailboxLock(folder: string) {
     this.selectedFolder = folder;
     this.openedFolders.push(folder);
@@ -65,6 +70,46 @@ const ACC_INPUT = {
 };
 
 describe('service index', () => {
+  it('shouldResetNamespace：仅含 & 的伪前缀才重置', () => {
+    expect(shouldResetNamespace('&YhF2hJHNiYFlh072-/')).toBe(true);
+    expect(shouldResetNamespace('INBOX.')).toBe(false);
+    expect(shouldResetNamespace('')).toBe(false);
+  });
+
+  it('新浪伪 NAMESPACE：connect 后覆写 prefix=""，list/lock 用干净文件夹名', async () => {
+    let fake: FakeImapFlow | null = null;
+    class Sina extends FakeImapFlow {
+      constructor(o: unknown) {
+        super(o);
+        fake = this;
+        this.namespace = { prefix: '&YhF2hJHNiYFlh072-/', delimiter: '/' };
+      }
+    }
+    const svc = buildService(makeDeps({ imapflow: Sina }));
+    await svc.handle('accounts.add', ACC_INPUT);
+    const accId = (await svc.handle('accounts.list', {}))[0].id;
+    const f = await svc.handle('folders.list', { accountId: accId }) as { drafts: string };
+    expect(fake!.namespace.prefix).toBe('');
+    expect(f.drafts).toBe('Drafts');
+    await svc.handle('mails.list', { accountId: accId, folder: 'Drafts' });
+    expect(fake!.openedFolders).toContain('Drafts');
+  });
+
+  it('正常 NAMESPACE 前缀（INBOX.）不得覆写', async () => {
+    let fake: FakeImapFlow | null = null;
+    class Normal extends FakeImapFlow {
+      constructor(o: unknown) {
+        super(o);
+        fake = this;
+        this.namespace = { prefix: 'INBOX.', delimiter: '.' };
+      }
+    }
+    const svc = buildService(makeDeps({ imapflow: Normal }));
+    await svc.handle('accounts.add', ACC_INPUT);
+    await svc.handle('folders.list', { accountId: (await svc.handle('accounts.list', {}))[0].id });
+    expect(fake!.namespace).toEqual({ prefix: 'INBOX.', delimiter: '.' });
+  });
+
   it('accounts.add→list→folders.list→mails.list 全链（fake vendor）', async () => {
     const svc = buildService(makeDeps());
     await svc.start();
