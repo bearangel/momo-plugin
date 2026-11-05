@@ -7,12 +7,28 @@ const crypto = require('node:crypto');
 
 const EXPIRE_MS = 24 * 3600 * 1000;
 const ATTACH_TOTAL_MAX = 25 * 1024 * 1024;
+const BODY_PREVIEW_MAX = 1000;
+
+// 对外投影：剔除 inputPayload（正文/附件 base64）——面板与 LLM 只见摘要与预览。
+function toView(rec) {
+  return {
+    id: rec.id, accountId: rec.accountId, status: rec.status,
+    to: rec.to, cc: rec.cc, subject: rec.subject, summary: rec.summary,
+    bodyPreview: String(rec.inputPayload?.text || '').slice(0, BODY_PREVIEW_MAX),
+    attachmentNames: rec.attachmentNames,
+    createdAt: rec.createdAt, sentAt: rec.sentAt, lastError: rec.lastError,
+    expireReason: rec.expireReason ?? null,
+  };
+}
 
 function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, mailbox }) {
   const file = path.join(dataDir, 'drafts.json');
   const sending = new Set(); // I-2 in-flight 守卫：同一草稿 id 并发 send 拒绝
   const readAll = () => {
-    try { return JSON.parse(fs.readFileSync(file, 'utf-8')); } catch { return []; }
+    try {
+      const v = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      return Array.isArray(v) ? v : [];
+    } catch { return []; }
   };
   const writeAll = (rows) => {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -55,9 +71,9 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
         createdAt: now().toISOString(), sentAt: null, lastError: null,
       };
       writeAll([...readAll(), rec]);
-      return rec;
+      return toView(rec);
     },
-    async list() { await this.sweep(); return readAll(); },
+    async list() { await this.sweep(); return readAll().map(toView); },
     async get(id) { return readAll().find((r) => r.id === id) || null; },
     async send(id) {
       if (sending.has(id)) throw new Error('草稿正在发送中'); // I-2
@@ -95,7 +111,7 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
         await mailbox.append(rec.accountId, sent, raw).catch(() => undefined); // Sent 归档失败不阻断
         await mailbox.deleteMessage(rec.accountId, draftsFolder, rec.uid).catch(() => undefined);
         try {
-          return patch(id, (r) => ({ ...r, status: 'sent', sentAt: now().toISOString(), lastError: null }));
+          return toView(patch(id, (r) => ({ ...r, status: 'sent', sentAt: now().toISOString(), lastError: null })));
         } catch (err) {
           const msg = String((err && err.message) || err);
           throw new Error(`发送已完成但登记失败: ${msg}（请勿重发，可在面板核对）`);

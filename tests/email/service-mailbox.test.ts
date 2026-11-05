@@ -18,18 +18,20 @@ function makeImap(script: Record<string, unknown> = {}) {
   const conn = {
     calls,
     lastCrit: null as unknown,
+    lastSource: null as unknown,
     async list() { calls.push('list'); return script.list ?? [
       { path: 'INBOX', specialUse: '\\Inbox' },
       { path: '草稿箱', specialUse: '\\Drafts' },
       { path: '已发送', specialUse: '\\Sent' },
     ]; },
     async search(_f: string, crit: unknown) { calls.push('search'); conn.lastCrit = crit; return script.uids ?? [3, 2, 1]; },
+    // 假数据故意升序：真实 IMAP search 返回 uid 升序，列表层须自行降序（Important-4）。
     async fetchEnvelopes() { calls.push('fetch'); return script.envelopes ?? [
-      { uid: 3, subject: 's3', from: 'a@b.c', to: 'me@qq.com', date: '2026-11-05T09:00:00Z', seen: false, hasAttachments: false, size: 1200 },
-      { uid: 2, subject: 's2', from: 'd@e.f', to: 'me@qq.com', date: '2026-11-05T08:00:00Z', seen: true, hasAttachments: true, size: 900 },
       { uid: 1, subject: 's1', from: 'g@h.i', to: 'me@qq.com', date: '2026-11-04T08:00:00Z', seen: false, hasAttachments: false, size: 800 },
+      { uid: 2, subject: 's2', from: 'd@e.f', to: 'me@qq.com', date: '2026-11-05T08:00:00Z', seen: true, hasAttachments: true, size: 900 },
+      { uid: 3, subject: 's3', from: 'a@b.c', to: 'me@qq.com', date: '2026-11-05T09:00:00Z', seen: false, hasAttachments: false, size: 1200 },
     ]; },
-    async fetchSource(uid: number) { calls.push('source'); return Buffer.from(`SRC:${uid}`); },
+    async fetchSource(folder: string, uid: number) { calls.push('source'); conn.lastSource = { folder, uid }; return Buffer.from(`SRC:${folder}:${uid}`); },
     async status() { calls.push('status'); return { unseen: 2 }; },
     async append() { calls.push('append'); return 42; },
     async deleteMessage() { calls.push('delete'); },
@@ -53,21 +55,24 @@ function makeMailbox(conn: ReturnType<typeof makeImap>, over: Record<string, unk
 }
 
 describe('mailbox', () => {
-  it('folders：specialUse 探测 + 中文/常用名 fallback', async () => {
+  it('folders：specialUse 探测 + 中文/常用名 fallback + unseen 计数', async () => {
     const mb = makeMailbox(makeImap());
     const f = await mb.folders('acc1');
     expect(f.drafts).toBe('草稿箱');
     expect(f.sent).toBe('已发送');
+    expect(f.unseen.INBOX).toBe(2);
+    expect(f.unseen['草稿箱']).toBe(2);
     const conn2 = makeImap({ list: [{ path: 'INBOX' }, { path: 'Drafts' }, { path: 'Sent Items' }] });
     const f2 = await makeMailbox(conn2).folders('acc1');
     expect(f2.drafts).toBe('Drafts');
     expect(f2.sent).toBe('Sent Items');
   });
 
-  it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新', async () => {
+  it('envelopes：首次拉 IMAP 落缓存；TTL 内二次不触网；force 强制刷新；uid 降序分页', async () => {
     const conn = makeImap();
     const mb = makeMailbox(conn);
-    await mb.envelopes('acc1', 'INBOX', {});
+    const page = await mb.envelopes('acc1', 'INBOX', {});
+    expect(page.items.map((e) => e.uid)).toEqual([3, 2, 1]);
     await mb.envelopes('acc1', 'INBOX', {});
     expect(conn.calls.filter((c) => c === 'search')).toHaveLength(1);
     await mb.envelopes('acc1', 'INBOX', { force: true });
@@ -101,6 +106,30 @@ describe('mailbox', () => {
     expect(r.truncated).toBe(true);
   });
 
+  it('read：HTML-only >200KB 同样截断（Important-3）', async () => {
+    const mb = makeMailbox(makeImap(), { parseMail: async () => ({ text: '', html: 'h'.repeat(250 * 1024), attachments: [] }) });
+    const r = await mb.read('acc1', 'INBOX', 3);
+    expect(r.truncated).toBe(true);
+    expect(r.html!.length).toBeLessThanOrEqual(200 * 1024 + 40);
+  });
+
+  it('read/attachment 传 folder 给 fetchSource（选箱契约）', async () => {
+    const conn = makeImap();
+    await makeMailbox(conn).read('acc1', 'INBOX', 3);
+    expect(conn.lastSource).toEqual({ folder: 'INBOX', uid: 3 });
+    const conn2 = makeImap();
+    await makeMailbox(conn2).attachment('acc1', 'INBOX', 2, '1.1');
+    expect(conn2.lastSource).toEqual({ folder: 'INBOX', uid: 2 });
+  });
+
+  it('正文内存 LRU：同参数 read 两次只取一次源', async () => {
+    const conn = makeImap();
+    const mb = makeMailbox(conn);
+    await mb.read('acc1', 'INBOX', 3);
+    await mb.read('acc1', 'INBOX', 3);
+    expect(conn.calls.filter((c) => c === 'source')).toHaveLength(1);
+  });
+
   it('attachment：≤10MB 守门 + partId 命中返回 base64', async () => {
     const conn = makeImap({ envelopes: [{ uid: 2, subject: 's', from: 'a@b.c', to: 'm', date: '2026-11-05T00:00:00Z', seen: true, hasAttachments: true, size: 11 * 1024 * 1024 }] });
     await expect(makeMailbox(conn).attachment('acc1', 'INBOX', 2, '1.1')).rejects.toThrow('10MB');
@@ -113,6 +142,14 @@ describe('mailbox', () => {
     const hang = makeImap();
     (hang as unknown as { search: unknown }).search = () => new Promise(() => undefined);
     await expect(makeMailbox(hang).envelopes('acc1', 'INBOX', {})).rejects.toThrow('超时');
+  });
+
+  it('单次 service 调用总预算：两段各 40ms > 60ms → 整链超时（minor-1）', async () => {
+    const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
+    const slow = makeImap();
+    (slow as unknown as { search: unknown }).search = async () => { await delay(40); return [1]; };
+    (slow as unknown as { fetchEnvelopes: unknown }).fetchEnvelopes = async () => { await delay(40); return []; };
+    await expect(makeMailbox(slow).envelopes('acc1', 'INBOX', {})).rejects.toThrow('超时');
   });
 
   it('TTL 常量 5min', () => { expect(CACHE_TTL_MS).toBe(300000); });

@@ -93,10 +93,31 @@ describe('drafts state machine', () => {
   it('discard pending → deleteMessage 被调 + 状态 discarded', async () => {
     const h = makeHarness();
     const d = await h.drafts.save(INPUT);
+    const full = await h.drafts.get(d.id);
     await h.drafts.discard(d.id);
     expect(h.deleted).toHaveLength(1);
-    expect(h.deleted[0]).toMatchObject({ folder: 'Drafts', uid: d.uid });
+    expect(h.deleted[0]).toMatchObject({ folder: 'Drafts', uid: full!.uid });
     expect((await h.drafts.get(d.id))!.status).toBe('discarded');
+  });
+
+  it('对外投影：save/list/send 无 inputPayload/dataBase64，bodyPreview ≤1000（Important-1）', async () => {
+    const h = makeHarness();
+    const d = await h.drafts.save({
+      ...INPUT, text: 'x'.repeat(3000),
+      attachments: [{ filename: 'a.bin', contentType: 'application/octet-stream', data: Buffer.from('bin') }],
+    });
+    expect(d).not.toHaveProperty('inputPayload');
+    expect(JSON.stringify(d)).not.toContain('dataBase64');
+    const v = (await h.drafts.list()).find((r) => r.id === d.id)!;
+    expect(v).not.toHaveProperty('inputPayload');
+    expect(JSON.stringify(v)).not.toContain('dataBase64');
+    expect(v.bodyPreview.length).toBeLessThanOrEqual(1000);
+    const sent = await h.drafts.send(d.id);
+    expect(sent).not.toHaveProperty('inputPayload');
+    expect(JSON.stringify(sent)).not.toContain('dataBase64');
+    expect(sent.bodyPreview.length).toBeLessThanOrEqual(1000);
+    // get 保留完整记录供内部重试（含 inputPayload）
+    expect((await h.drafts.get(d.id))!.inputPayload).toBeTruthy();
   });
 
   it('discard sent 记录 → no-op（状态仍 sent、deleted 无新增）', async () => {

@@ -178,7 +178,8 @@ describe.skipIf(!HOST_READY)('email dev 装载全链路', () => {
     );
   });
 
-  it.skipIf(!VENDOR_REAL)('createService 冒烟：start → 未知方法中文错误 → stop（真 vendor require 链）', async () => {
+  it('createService 冒烟：start → 未知方法中文错误 → stop（真 vendor require 链）', async () => {
+    if (!VENDOR_REAL) throw new Error('vendor 未安装：请在 plugins/email/vendor 执行 npm install');
     const requirePlugin = createRequire(path.join(PLUGIN_ROOT, 'service', 'index.js'));
     const mod = requirePlugin(path.join(PLUGIN_ROOT, 'service', 'index.js')) as {
       createService(ctx: {

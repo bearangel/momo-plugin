@@ -4,7 +4,7 @@
 
 ## 安装（开发流）
 
-1. `cd vendor && npm install`（imapflow/nodemailer/mailparser，纯 JS 零 ABI）
+1. `cd plugins/email/vendor && npm install`（imapflow/nodemailer/mailparser，纯 JS 零 ABI）
 2. Momo Studio → 设置 → 插件 → 开发目录装载 → 选本目录（`plugins/email`）
 3. 资源库启用「邮件助手」agent（默认全局聊天模型）
 

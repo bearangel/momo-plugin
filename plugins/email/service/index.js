@@ -42,16 +42,22 @@ function imapAdapterFor(ImapFlow) {
       logger: false,
     });
     await client.connect();
+    // 选箱纪律：ImapFlow 在未选箱（this.mailbox === false）时 search/fetch/fetchOne 直接空返回，
+    // 且 folder 不是这些方法的合法参数（会被静默忽略）——每次按 folder 操作必须显式取锁选箱。
+    const withMailbox = async (folder, fn) => {
+      const lock = await client.getMailboxLock(folder);
+      try { return await fn(); } finally { lock.release(); }
+    };
     return {
       list: async () => (await client.list()).map((f) => ({ path: f.path, specialUse: f.specialUse || null })),
       search: async (folder, crit) => {
         const s = { ...crit };
         if (Object.keys(s).length === 0) s.all = true;
-        return client.search({ folder, ...s }, { uid: true }) ?? [];
+        return withMailbox(folder, async () => (await client.search(s, { uid: true })) ?? []);
       },
-      fetchEnvelopes: async (folder, uids) => {
+      fetchEnvelopes: async (folder, uids) => withMailbox(folder, async () => {
         const out = [];
-        for await (const msg of client.fetch(uids, { envelope: true, bodyStructure: true, size: true }, { folder, uid: true })) {
+        for await (const msg of client.fetch(uids, { envelope: true, bodyStructure: true, size: true }, { uid: true })) {
           out.push({
             uid: msg.uid,
             subject: msg.envelope?.subject ?? '',
@@ -64,22 +70,28 @@ function imapAdapterFor(ImapFlow) {
           });
         }
         return out;
-      },
-      fetchSource: async (uid) => {
+      }),
+      fetchSource: async (folder, uid) => withMailbox(folder, async () => {
         const r = await client.fetchOne(String(uid), { source: true }, { uid: true });
         if (!r || !r.source) throw new Error('邮件源获取失败');
         return r.source;
-      },
+      }),
       status: async (folder) => client.status(folder, { unseen: true }),
       append: async (folder, raw) => (await client.append(folder, raw))?.uid ?? 0,
-      deleteMessage: async (folder, uid) => { await client.messageDelete(String(uid), { folder, uid: true }); },
+      deleteMessage: async (folder, uid) => withMailbox(folder, async () => {
+        await client.messageDelete(String(uid), { uid: true });
+      }),
       close: async () => { await client.logout().catch(() => client.close?.()); },
     };
   };
 }
 
+// 认证类失败识别：命中则标记账号健康态（spec §10），下次列表即显红点。
+const AUTH_FAIL_RE = /AUTHENTICATIONFAILED|LOGIN failed|authenticate|Invalid credentials|535/i;
+
 function buildService(deps) {
   const { dataDir, secrets, logger } = deps;
+  const smtpTimeoutMs = deps.smtpTimeoutMs ?? 8000;
   fs.mkdirSync(dataDir, { recursive: true });
   const accountStore = createAccountStore({ dataDir, secrets });
   const cache = createEnvelopeCache({ dataDir });
@@ -89,11 +101,30 @@ function buildService(deps) {
   // （momo-studio electron/src/main/agent/plugin-hook-bridge.ts，2026-11-05 实测 < 30s），
   // IMAP 慢操作须先于桥超时落定并给出中文错误——opTimeoutMs = 桥超时 − 2s = 8s。
   const mailbox = createMailbox({ accountStore, cache, imapConnect, parseMail, opTimeoutMs: 8000 });
+  // SMTP/连通性探测超时：默认 8s（先于宿主 callService 桥 10s 落定，文案含「超时」）。
+  const smtpGuard = (label, p, ms = smtpTimeoutMs) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`SMTP ${label} 超时（${ms}ms）`)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+  const withHealth = async (accountId, fn) => {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = String((err && err.message) || err);
+      if (accountId && AUTH_FAIL_RE.test(msg)) {
+        await accountStore.markHealth(accountId, 'error', msg).catch(() => undefined);
+      }
+      throw err;
+    }
+  };
   const renderMail = async (input) => renderRawMail({ nodemailerLib: deps.nodemailerLib, ...input });
   const smtpSend = async (accountId, raw, envelope) => {
     const acc = await accountStore.get(accountId);
     const pw = await accountStore.getPassword(accountId);
-    await smtpTransportOf(deps.nodemailerLib, acc, pw).sendMail({ raw, envelope });
+    await smtpGuard('发送', smtpTransportOf(deps.nodemailerLib, acc, pw).sendMail({ raw, envelope }));
   };
   const drafts = createDrafts({ dataDir, renderMail, smtpSend, mailbox });
 
@@ -115,9 +146,9 @@ function buildService(deps) {
           smtp: { host: p.smtp.host, port: p.smtp.port, tlsMode: p.smtp.tlsMode },
         };
         try {
-          const conn = await imapConnect(probe, p.password);
+          const conn = await smtpGuard('IMAP 连接', imapConnect(probe, p.password));
           await conn.close();
-          await smtpTransportOf(deps.nodemailerLib, probe, p.password).verify();
+          await smtpGuard('验证', smtpTransportOf(deps.nodemailerLib, probe, p.password).verify());
           return { ok: true };
         } catch (err) {
           return { ok: false, error: String((err && err.message) || err) };
@@ -126,9 +157,9 @@ function buildService(deps) {
       if (!acc) throw new Error(`账号不存在: ${p.email}`);
       const pw = await accountStore.getPassword(acc.id);
       try {
-        const conn = await imapConnect(acc, pw);
+        const conn = await smtpGuard('IMAP 连接', imapConnect(acc, pw));
         await conn.close();
-        await smtpTransportOf(deps.nodemailerLib, acc, pw).verify();
+        await smtpGuard('验证', smtpTransportOf(deps.nodemailerLib, acc, pw).verify());
         await accountStore.markHealth(acc.id, 'ok');
         return { ok: true };
       } catch (err) {
@@ -137,13 +168,13 @@ function buildService(deps) {
         return { ok: false, error: msg };
       }
     },
-    'folders.list': (p) => mailbox.folders(p.accountId),
-    'mails.list': (p) => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
-      { page: p.page, pageSize: p.pageSize, filter: p.filter, force: false }),
-    'mails.refresh': (p) => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
-      { force: true, filter: p.filter, page: p.page, pageSize: p.pageSize }),
-    'mails.get': (p) => mailbox.read(p.accountId, p.folder, p.uid),
-    'attachments.get': (p) => mailbox.attachment(p.accountId, p.folder, p.uid, p.partId),
+    'folders.list': (p) => withHealth(p.accountId, () => mailbox.folders(p.accountId)),
+    'mails.list': (p) => withHealth(p.accountId, () => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
+      { page: p.page, pageSize: p.pageSize, filter: p.filter, force: false })),
+    'mails.refresh': (p) => withHealth(p.accountId, () => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
+      { force: true, filter: p.filter, page: p.page, pageSize: p.pageSize })),
+    'mails.get': (p) => withHealth(p.accountId, () => mailbox.read(p.accountId, p.folder, p.uid)),
+    'attachments.get': (p) => withHealth(p.accountId, () => mailbox.attachment(p.accountId, p.folder, p.uid, p.partId)),
     'drafts.save': async (p) => {
       // '__first__' = 工具侧首账号回退哨兵（draft_mail 未指定 accountId 时）
       let accountId = p.accountId;

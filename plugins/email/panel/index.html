@@ -113,7 +113,7 @@
   function call(method, params) { return send('plugin:callService', { method: method, params: params || {} }); }
 
   // 状态
-  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [] };
+  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false };
   var PRESETS = {
     qq: { ih: 'imap.qq.com', ip: 993, it: 'tls', sh: 'smtp.qq.com', sp: 465, st: 'tls' },
     '163': { ih: 'imap.163.com', ip: 993, it: 'tls', sh: 'smtp.163.com', sp: 465, st: 'tls' },
@@ -192,7 +192,8 @@
         var items = [{ p: 'INBOX', t: '收件箱' }, { p: S.folders.drafts, t: '草稿箱' }, { p: S.folders.sent, t: '已发送' }];
         items.forEach(function (it) {
           if (!it.p) return;
-          h += '<div class="folder' + (S.folder === it.p ? ' on' : '') + '" data-folder="' + attrEsc(it.p) + '" onclick="pickFolder(this.dataset.folder)"><span>' + it.t + '</span></div>';
+          var unseen = (S.folders.unseen && S.folders.unseen[it.p]) || 0;
+          h += '<div class="folder' + (S.folder === it.p ? ' on' : '') + '" data-folder="' + attrEsc(it.p) + '" onclick="pickFolder(this.dataset.folder)"><span>' + it.t + '</span>' + (unseen > 0 ? '<span class="n">' + Number(unseen) + '</span>' : '') + '</div>';
         });
       }
     });
@@ -265,8 +266,10 @@
   }
 
   // —— 账号表单 ——
-  function openAccountForm() { $('account-form').style.display = 'flex'; $('f-status').textContent = ''; }
+  function openAccountForm() { S.testOk = false; $('account-form').style.display = 'flex'; $('f-status').textContent = ''; }
   function closeAccountForm() { $('account-form').style.display = 'none'; }
+  // 任何表单改动都使既有「测试通过」失效——保存前必须重新测试（spec §5.2）
+  function resetTestOk() { S.testOk = false; }
   function applyPreset() {
     var key = $('f-preset').value || presetKeyOf($('f-email').value);
     if (key && PRESETS[key]) { var p = PRESETS[key]; $('f-ih').value = p.ih; $('f-ip').value = p.ip; $('f-it').value = p.it; $('f-sh').value = p.sh; $('f-sp').value = p.sp; $('f-st').value = p.st; $('f-user').value = $('f-email').value; }
@@ -288,11 +291,13 @@
   function testAccount() {
     $('f-status').className = 'status'; $('f-status').textContent = '连接测试中…';
     call('accounts.test', formInput()).then(function (r) {
+      S.testOk = !!r.ok;
       $('f-status').className = 'status' + (r.ok ? '' : ' err');
       $('f-status').textContent = r.ok ? '连接成功 ✓（可保存）' : '失败：' + r.error;
-    }).catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
+    }).catch(function (e) { S.testOk = false; $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
   }
   function saveAccount() {
+    if (S.testOk !== true) { $('f-status').className = 'status err'; $('f-status').textContent = '请先测试连接'; return; }
     call('accounts.add', formInput()).then(function () { closeAccountForm(); boot(); })
       .catch(function (e) { $('f-status').className = 'status err'; $('f-status').textContent = e.message; });
   }
@@ -331,6 +336,13 @@
       if (!S.accId && S.accounts.length) { pickAccount(S.accounts[0].id); } else { renderAccounts(); }
     }).catch(function (e) { $('folders').innerHTML = '<p class="hint" style="padding:8px;color:var(--err)">' + esc(e.message) + '</p>'; });
   }
+
+  ['f-preset', 'f-email', 'f-name', 'f-ih', 'f-ip', 'f-it', 'f-sh', 'f-sp', 'f-st', 'f-user', 'f-pw'].forEach(function (id) {
+    var el = $(id);
+    if (!el) return;
+    el.addEventListener('input', resetTestOk);
+    el.addEventListener('change', resetTestOk);
+  });
 
   send('ready').then(function (res) { applyTheme(res && res.result ? res.result : res); boot(); setInterval(function () { if (S.accId) reloadList(); }, 60000); })
     .catch(function (e) { $('folders').innerHTML = '<p class="hint" style="padding:8px;color:var(--err)">面板初始化失败：' + esc(e.message) + '</p>'; });

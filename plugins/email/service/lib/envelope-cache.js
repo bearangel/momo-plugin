@@ -34,12 +34,9 @@ function createEnvelopeCache({ dataDir }) {
       }
     },
     write(accountId, folder, envelopes) {
-      // 保序纪律：≤500 条按调用方给定顺序原样存（IMAP 页序即展示序）；
-      // 仅超界时按 uid 降序截断保留最新 500（brief 实现无条件排序会破坏页序，与本文件配套测试冲突，以此为准）。
-      const normalized = normalizeEnvelopes(envelopes);
-      const items = normalized.length > MAX_ITEMS
-        ? normalized.sort((a, b) => b.uid - a.uid).slice(0, MAX_ITEMS)
-        : normalized;
+      // 恒按 uid 降序（最新在前）后截断 500：IMAP 返回顺序不保证（常为升序），
+      // 原样存会把最旧邮件送到第一页（真机现象），排序须无条件执行。
+      const items = normalizeEnvelopes(envelopes).sort((a, b) => b.uid - a.uid).slice(0, MAX_ITEMS);
       const target = fileOf(accountId, folder);
       fs.mkdirSync(path.dirname(target), { recursive: true });
       const tmp = target + '.tmp-' + process.pid + '-' + Date.now();

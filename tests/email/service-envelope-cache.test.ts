@@ -15,11 +15,11 @@ const mk = (uid: number, date = '2026-11-01T00:00:00Z') => ({
 });
 
 describe('envelope cache', () => {
-  it('write→read 回读并携带 savedAt 元数据', () => {
+  it('write→read 回读并携带 savedAt 元数据；升序入参落盘后为降序', () => {
     const c = createEnvelopeCache({ dataDir: dir });
     c.write('acc1', 'INBOX', [mk(1), mk(2)]);
     const hit = c.read('acc1', 'INBOX')!;
-    expect(hit.items.map((e: { uid: number }) => e.uid)).toEqual([1, 2]);
+    expect(hit.items.map((e: { uid: number }) => e.uid)).toEqual([2, 1]);
     expect(typeof hit.savedAt).toBe('number');
   });
 

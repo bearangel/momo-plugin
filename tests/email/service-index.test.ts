@@ -10,19 +10,38 @@ let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-svc-')); });
 afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 
+// 保真 FakeImapFlow：真实 ImapFlow 未选箱时 search/fetch/fetchOne 静默空返回（Critical-1 根因），
+// 假实现必须同样拒绝操作，否则「适配层忘了 getMailboxLock」会被测试假绿放行。
 class FakeImapFlow {
   opts: unknown;
+  selectedFolder: string | null = null;
+  openedFolders: string[] = [];
   constructor(opts: unknown) { this.opts = opts; }
   async connect() {}
   async logout() {}
   async list() { return [{ path: 'INBOX', specialUse: '\\Inbox' }, { path: 'Drafts', specialUse: '\\Drafts' }, { path: 'Sent', specialUse: '\\Sent' }]; }
-  async search() { return [1]; }
+  async getMailboxLock(folder: string) {
+    this.selectedFolder = folder;
+    this.openedFolders.push(folder);
+    return { release: () => {} };
+  }
+  async search() {
+    if (!this.selectedFolder) throw new Error('No mailbox selected');
+    return [1];
+  }
   async *fetch() {
+    if (!this.selectedFolder) throw new Error('No mailbox selected');
     yield { uid: 1, envelope: { subject: 's', from: [{ address: 'a@b.c' }], to: [{ address: 'm@n.o' }], date: new Date('2026-11-05T00:00:00Z') }, flags: new Set(), bodyStructure: {}, size: 100 };
   }
-  async fetchOne() { return { source: Buffer.from('MIME') }; }
+  async fetchOne() {
+    if (!this.selectedFolder) throw new Error('No mailbox selected');
+    return { source: Buffer.from('MIME') };
+  }
+  async status() { return { unseen: 2 }; }
   async append() { return { uid: 7 }; }
-  async messageDelete() {}
+  async messageDelete() {
+    if (!this.selectedFolder) throw new Error('No mailbox selected');
+  }
   async close() {}
 }
 function makeDeps(over: Record<string, unknown> = {}) {
@@ -57,6 +76,24 @@ describe('service index', () => {
     await svc.stop();
   });
 
+  it('mails.list 前必须选箱：openedFolders 含 INBOX（Critical-1 回归锁）', async () => {
+    let fake: FakeImapFlow | null = null;
+    class Spy extends FakeImapFlow { constructor(o: unknown) { super(o); fake = this; } }
+    const svc = buildService(makeDeps({ imapflow: Spy }));
+    await svc.handle('accounts.add', ACC_INPUT);
+    const accId = (await svc.handle('accounts.list', {}))[0].id;
+    await svc.handle('mails.list', { accountId: accId, folder: 'INBOX' });
+    expect(fake!.openedFolders).toContain('INBOX');
+  });
+
+  it('FakeImapFlow 保真：未选箱直接 search/fetchOne 必须抛（建模真实 ImapFlow 语义）', async () => {
+    const fake = new FakeImapFlow({});
+    await expect(fake.search()).rejects.toThrow('No mailbox selected');
+    await expect(fake.fetchOne()).rejects.toThrow('No mailbox selected');
+    await fake.getMailboxLock('INBOX');
+    await expect(fake.search()).resolves.toEqual([1]);
+  });
+
   it('未知方法 → 中文错误（fail loud）', async () => {
     const svc = buildService(makeDeps());
     await expect(svc.handle('nope.nothing', {})).rejects.toThrow('未知方法');
@@ -79,6 +116,16 @@ describe('service index', () => {
     expect(secretWrites).toBe(0);
   });
 
+  it('accounts.test SMTP verify 挂起 → 超时文案（smtpTimeoutMs 上限）', async () => {
+    const svc = buildService(makeDeps({
+      smtpTimeoutMs: 20,
+      nodemailerLib: { createTransport: () => ({ verify: () => new Promise(() => undefined), sendMail: async () => ({ ok: true }) }) },
+    }));
+    const r = await svc.handle('accounts.test', { ...ACC_INPUT, email: 'slow@qq.com' }) as { ok: boolean; error: string };
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain('超时');
+  });
+
   it('tlsMode=tls → ImapFlow secure:true（starttls → requireTLS，明文不可能构造）', async () => {
     let seen: unknown;
     class Spy extends FakeImapFlow { constructor(o: unknown) { super(o); seen = o; } }
@@ -86,6 +133,19 @@ describe('service index', () => {
     await svc.handle('accounts.add', ACC_INPUT);
     await svc.handle('mails.list', { accountId: (await svc.handle('accounts.list', {}))[0].id, folder: 'INBOX' });
     expect(seen).toMatchObject({ secure: true });
+  });
+
+  it('认证失败 → 账号健康态标 error（AUTHENTICATIONFAILED）', async () => {
+    class AuthFail extends FakeImapFlow {
+      async connect() { throw new Error('AUTHENTICATIONFAILED Invalid credentials'); }
+    }
+    const svc = buildService(makeDeps({ imapflow: AuthFail }));
+    await svc.handle('accounts.add', ACC_INPUT);
+    const accId = (await svc.handle('accounts.list', {}))[0].id;
+    await expect(svc.handle('mails.list', { accountId: accId, folder: 'INBOX' }))
+      .rejects.toThrow('AUTHENTICATIONFAILED');
+    const after = (await svc.handle('accounts.list', {})) as Array<{ health: { state: string } }>;
+    expect(after[0]!.health.state).toBe('error');
   });
 
   it('drafts.save（base64 附件）→ drafts.send 状态机全链', async () => {

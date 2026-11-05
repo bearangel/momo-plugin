@@ -35,6 +35,9 @@ describe.skipIf(!HOST_READY)('email panel', () => {
     }
     // HTML 邮件渲染必须走嵌套沙箱 iframe（spec §8/§11）
     expect(html).toContain('sandbox=""');
+    // 未读数角标（spec §8）+ 测试通过才允许保存（spec §5.2）
+    expect(html).toContain('unseen');
+    expect(html).toContain('testOk');
   });
 
   it('面板沙箱合规：无原生 confirm/alert，自绘确认条 + 属性注入面收口 + 邮件 CSP', () => {

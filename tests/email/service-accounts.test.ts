@@ -65,9 +65,25 @@ describe('accounts store', () => {
     expect(await store.list()).toEqual([]);
   });
 
-  it('accounts.json 损坏 → 空表重建不抛', async () => {
+  it('accounts.json 损坏/非数组 → 空表重建不抛', async () => {
     fs.writeFileSync(path.join(dir, 'accounts.json'), '{broken', 'utf-8');
     const store = createAccountStore({ dataDir: dir, secrets: makeSecrets() });
+    expect(await store.list()).toEqual([]);
+    fs.writeFileSync(path.join(dir, 'accounts.json'), '{"a":1}', 'utf-8');
+    expect(await store.list()).toEqual([]);
+  });
+
+  it('add：secrets.set 失败 → JSON 不落库（list 空）（Important-5）', async () => {
+    const secrets = {
+      async get() { return null; },
+      async set() { throw new Error('keychain down'); },
+      async delete() {},
+    };
+    const store = createAccountStore({ dataDir: dir, secrets });
+    await expect(store.add({
+      email: 'a@b.c', username: 'a@b.c', password: 'p',
+      imap: PRESETS.qq.imap, smtp: PRESETS.qq.smtp,
+    })).rejects.toThrow('keychain');
     expect(await store.list()).toEqual([]);
   });
 

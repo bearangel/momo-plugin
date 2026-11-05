@@ -29,7 +29,10 @@ function presetFor(email) {
 function createAccountStore({ dataDir, secrets }) {
   const file = path.join(dataDir, 'accounts.json');
   const readAll = () => {
-    try { return JSON.parse(fs.readFileSync(file, 'utf-8')); } catch { return []; }
+    try {
+      const v = JSON.parse(fs.readFileSync(file, 'utf-8'));
+      return Array.isArray(v) ? v : [];
+    } catch { return []; }
   };
   const writeAll = (rows) => {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -68,8 +71,14 @@ function createAccountStore({ dataDir, secrets }) {
         smtp: { ...input.smtp },
       };
       rows.push(rec);
-      writeAll(rows);
+      // 凭据先行：secrets.set 成功后才落 JSON——JSON 写失败回滚凭据，避免「有密码无账号」残留。
       await secrets.set('account:' + rec.id, String(password || ''));
+      try {
+        writeAll(rows);
+      } catch (err) {
+        await secrets.delete('account:' + rec.id).catch(() => undefined);
+        throw err;
+      }
       return rec;
     },
     async update(id, patch) {
