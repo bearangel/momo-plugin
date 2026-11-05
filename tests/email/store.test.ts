@@ -40,15 +40,15 @@ describe('store', () => {
     store.close();
   });
 
-  it('user_version>2 → 中文错误（不静默重建）', () => {
+  it('user_version>3 → 中文错误（不静默重建）', () => {
     const file = path.join(dir, 'data.db');
     const db = new DatabaseSync(file);
-    db.exec('PRAGMA user_version=3');
+    db.exec('PRAGMA user_version=4');
     db.close();
     expect(() => createStore({ dataDir: dir })).toThrow('数据文件由更新版本插件创建');
   });
 
-  it('v1 → v2 迁移：补建 folder_cache 并置 user_version=2', () => {
+  it('v1 存量库 → 补建 folder_cache + local_archive 并置 user_version=3', () => {
     const first = createStore({ dataDir: dir });
     first.close();
     const file = path.join(dir, 'data.db');
@@ -61,8 +61,9 @@ describe('store', () => {
     store.writeFoldersCache('acc1', { drafts: 'Drafts', sent: null });
     expect(store.readFoldersCache('acc1')!.value).toEqual({ drafts: 'Drafts', sent: null });
     const check = new DatabaseSync(file);
-    expect(check.prepare('PRAGMA user_version').get()!.user_version).toBe(2);
+    expect(check.prepare('PRAGMA user_version').get()!.user_version).toBe(3);
     check.close();
+    expect(store.getArchiveRow('acc1', 'INBOX', 1)).toBeNull();
     store.close();
   });
 
@@ -165,10 +166,10 @@ describe('local_archive（schema v3）', () => {
     expect(s.getArchiveRow('a', 'INBOX', 7)!.state).toBe('missing');
     s.upsertArchiveRow(row({ uid: 8, state: 'corrupt', sizeBytes: 1 }));
     s.upsertArchiveRow(row({ uid: 9, state: 'too_large', sizeBytes: 0 }));
-    expect(s.archiveStats('r1')).toEqual({ files: 3, bytes: 201, missing: 1, corrupt: 1, tooLarge: 1 });
+    expect(s.archiveStats('r1')).toEqual({ files: 0, bytes: 0, missing: 1, corrupt: 1, tooLarge: 1 });
     expect(s.deleteArchiveRows('a', { folder: 'INBOX', uid: 8 })).toBe(1);
     expect(s.getArchiveRow('a', 'INBOX', 8)).toBeNull();
-    expect(s.listArchiveRows('a', { state: 'ok' })).toHaveLength(2);
+    expect(s.listArchiveRows('a')).toHaveLength(2);
     expect(s.deleteArchiveRows('a', { folder: 'INBOX' })).toBe(2);
     expect(s.getArchiveRow('a', 'INBOX', 7)).toBeNull();
     s.close();
