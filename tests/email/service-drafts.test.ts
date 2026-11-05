@@ -10,7 +10,7 @@ let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-drafts-')); });
 afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 
-function makeHarness(over: { smtpSend?: () => Promise<void> } = {}) {
+function makeHarness(over: { smtpSend?: (accId: string, raw: Buffer, envelope: unknown) => Promise<void> } = {}) {
   const appended: Array<{ folder: string; raw: Buffer }> = [];
   const deleted: Array<{ folder: string; uid: number }> = [];
   let sentEnv: unknown = null;
@@ -88,5 +88,69 @@ describe('drafts state machine', () => {
     fs.writeFileSync(path.join(dir, 'drafts.json'), '{broken', 'utf-8');
     const h = makeHarness();
     expect(await h.drafts.list()).toEqual([]);
+  });
+
+  it('discard pending → deleteMessage 被调 + 状态 discarded', async () => {
+    const h = makeHarness();
+    const d = await h.drafts.save(INPUT);
+    await h.drafts.discard(d.id);
+    expect(h.deleted).toHaveLength(1);
+    expect(h.deleted[0]).toMatchObject({ folder: 'Drafts', uid: d.uid });
+    expect((await h.drafts.get(d.id))!.status).toBe('discarded');
+  });
+
+  it('discard sent 记录 → no-op（状态仍 sent、deleted 无新增）', async () => {
+    const h = makeHarness();
+    const d = await h.drafts.save(INPUT);
+    await h.drafts.send(d.id);
+    const delCount = h.deleted.length;
+    await h.drafts.discard(d.id);
+    expect(h.deleted).toHaveLength(delCount);
+    expect((await h.drafts.get(d.id))!.status).toBe('sent');
+  });
+
+  it('send 过期草稿（不经 list）→ 拒绝「已过期作废」且状态变 discarded', async () => {
+    const h = makeHarness();
+    const d = await h.drafts.save(INPUT);
+    h.setNow(Date.parse('2026-11-05T10:00:00Z') + 25 * 3600 * 1000);
+    await expect(h.drafts.send(d.id)).rejects.toThrow('已过期作废');
+    const rec = await h.drafts.get(d.id);
+    expect(rec!.status).toBe('discarded');
+    expect(rec!.expireReason).toBe('24h 未确认自动作废');
+  });
+
+  it('SMTP 失败后重试成功 → 最终 sent + envelope 透传自登记条目', async () => {
+    let fail = true;
+    let env: unknown = null;
+    const h = makeHarness({ smtpSend: async (_acc, _raw, envelope) => {
+      if (fail) throw new Error('554 rejected');
+      env = envelope;
+    } });
+    const d = await h.drafts.save(INPUT);
+    await expect(h.drafts.send(d.id)).rejects.toThrow('554');
+    expect((await h.drafts.get(d.id))!.status).toBe('pending');
+    fail = false;
+    await h.drafts.send(d.id);
+    expect((await h.drafts.get(d.id))!.status).toBe('sent');
+    expect(env).toMatchObject({ from: 'me@qq.com', to: ['x@y.z'] });
+  });
+
+  it('SMTP 成功后登记失败 → 抛「请勿重发」而非可重试文案', async () => {
+    const h = makeHarness({ smtpSend: async () => { fs.rmSync(path.join(dir, 'drafts.json')); } });
+    const d = await h.drafts.save(INPUT);
+    await expect(h.drafts.send(d.id)).rejects.toThrow('请勿重发');
+    await expect(h.drafts.send(d.id)).rejects.toThrow('不存在');
+  });
+
+  it('同一草稿并发 send → 第二次拒绝「正在发送中」', async () => {
+    let release: () => void = () => {};
+    const gate = new Promise<void>((r) => { release = r; });
+    const h = makeHarness({ smtpSend: async () => { await gate; } });
+    const d = await h.drafts.save(INPUT);
+    const first = h.drafts.send(d.id);
+    await expect(h.drafts.send(d.id)).rejects.toThrow('正在发送中');
+    release();
+    await first;
+    expect((await h.drafts.get(d.id))!.status).toBe('sent');
   });
 });

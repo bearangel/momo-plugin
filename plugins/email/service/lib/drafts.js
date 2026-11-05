@@ -10,6 +10,7 @@ const ATTACH_TOTAL_MAX = 25 * 1024 * 1024;
 
 function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, mailbox }) {
   const file = path.join(dataDir, 'drafts.json');
+  const sending = new Set(); // I-2 in-flight 守卫：同一草稿 id 并发 send 拒绝
   const readAll = () => {
     try { return JSON.parse(fs.readFileSync(file, 'utf-8')); } catch { return []; }
   };
@@ -59,32 +60,54 @@ function createDrafts({ dataDir, now = () => new Date(), renderMail, smtpSend, m
     async list() { await this.sweep(); return readAll(); },
     async get(id) { return readAll().find((r) => r.id === id) || null; },
     async send(id) {
+      if (sending.has(id)) throw new Error('草稿正在发送中'); // I-2
       const rec = readAll().find((r) => r.id === id);
       if (!rec) throw new Error(`草稿不存在: ${id}`);
       if (rec.status !== 'pending') throw new Error(`草稿状态为 ${rec.status}，不可发送`);
+      // M-3 发送前过期检查（不经 list/sweep 也会拦下；expireReason 与 sweep 同文）
+      if (Date.parse(rec.createdAt) < now().getTime() - EXPIRE_MS) {
+        patch(id, (r) => ({ ...r, status: 'discarded', expireReason: '24h 未确认自动作废' }));
+        throw new Error('草稿已过期作废（24h 未确认）');
+      }
+      sending.add(id);
       try {
-        const p = rec.inputPayload;
-        const raw = await renderMail({
-          ...p,
-          attachments: (p.attachments || []).map((a) => ({
-            filename: a.filename, contentType: a.contentType, data: Buffer.from(a.dataBase64, 'base64'),
-          })),
-        });
-        await smtpSend(rec.accountId, raw, { from: rec.fromAddr, to: rec.to, cc: rec.cc });
-        const sent = await mailbox.sentFolder(rec.accountId);
+        let sent;
+        let draftsFolder;
+        let raw;
+        try {
+          // I-1 文件夹解析前置到 smtpSend 之前：此处失败 = 未发信的合法预检失败，可安全重试
+          sent = await mailbox.sentFolder(rec.accountId);
+          draftsFolder = await mailbox.draftsFolder(rec.accountId);
+          const p = rec.inputPayload;
+          raw = await renderMail({
+            ...p,
+            attachments: (p.attachments || []).map((a) => ({
+              filename: a.filename, contentType: a.contentType, data: Buffer.from(a.dataBase64, 'base64'),
+            })),
+          });
+          await smtpSend(rec.accountId, raw, { from: rec.fromAddr, to: rec.to, cc: rec.cc });
+        } catch (err) {
+          const msg = String((err && err.message) || err);
+          patch(id, (r) => ({ ...r, lastError: msg }));
+          throw new Error(`发送失败（草稿已保留可重试）: ${msg}`);
+        }
+        // ——— 此线以下邮件已物理发出：一切失败不得再产生「可重试」语义（I-1）———
         await mailbox.append(rec.accountId, sent, raw).catch(() => undefined); // Sent 归档失败不阻断
-        const draftsFolder = await mailbox.draftsFolder(rec.accountId);
         await mailbox.deleteMessage(rec.accountId, draftsFolder, rec.uid).catch(() => undefined);
-        return patch(id, (r) => ({ ...r, status: 'sent', sentAt: now().toISOString(), lastError: null }));
-      } catch (err) {
-        const msg = String((err && err.message) || err);
-        patch(id, (r) => ({ ...r, lastError: msg }));
-        throw new Error(`发送失败（草稿已保留可重试）: ${msg}`);
+        try {
+          return patch(id, (r) => ({ ...r, status: 'sent', sentAt: now().toISOString(), lastError: null }));
+        } catch (err) {
+          const msg = String((err && err.message) || err);
+          throw new Error(`发送已完成但登记失败: ${msg}（请勿重发，可在面板核对）`);
+        }
+      } finally {
+        sending.delete(id);
       }
     },
     async discard(id) {
       const rec = readAll().find((r) => r.id === id);
       if (!rec) return;
+      if (rec.status === 'sent') return; // M-1 终态不可越：已发送记录不删信不再改状态
       if (rec.status === 'pending') {
         const folder = await mailbox.draftsFolder(rec.accountId);
         await mailbox.deleteMessage(rec.accountId, folder, rec.uid).catch(() => undefined);
