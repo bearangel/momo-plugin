@@ -28,3 +28,9 @@ description: 测试纪律——位置约定探测、先红后绿、mock 保真�
 
 - 测试失败先诊断根因再改；禁止删改断言「转绿」
 - 与本变更无关的失败如实单报，不扩 scope 顺手修
+
+## E2E 走查
+
+- web 项目在单测外补关键路径走查：bash 后台起服务 → 浏览器沿用户动线操作（navigate / click / type）→ snapshot / screenshot 存证
+- 失败取证：browser_console_messages 报错原文 + 复现步骤写进报告
+- 跑完 process_kill 释放端口；需用户复现的缺陷用 process_keep 留现场并附访问地址

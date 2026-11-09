@@ -20,6 +20,12 @@ description: 实现纪律——先读后改节奏、最小 diff 判例、验证�
 - 目标仓有测试 → 跑相邻测试；无测试 → 类型检查；再无 → 构建 / 语法检查
 - 结果如实汇报，绿了才算数
 
+## 浏览器自检
+
+- web 变更验证闭环：bash 后台起 dev server → 浏览器亲验（snapshot 看结构 / screenshot 存证 / console_messages 查报错）
+- 沙箱内 bash kill 全 EPERM：换配置重启一律 process_kill（按 port）关旧再起，不走 bash kill
+- 用户要亲自查看：process_keep 保留服务 + 附访问地址；无人查看的不保留（回合结束平台自动回收）
+
 ## 提交规范
 
 - conventional commits：feat / fix / chore / docs / test / refactor（+ scope）

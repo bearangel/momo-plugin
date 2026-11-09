@@ -18,6 +18,7 @@ description: 调试流程——复现先行、多假设并行、证据链记录�
 ## 证据链
 
 - 记录格式：症状 → 观察到的证据 → 推断 → 验证结果；症状到原因之间不许跳步
+- 前端问题证据源：browser_snapshot（页面态）/ browser_console_messages（报错原文）/ browser_evaluate（注入验证假设）
 - 二分法定位（注释一半 / 回退一版）优于随机尝试
 
 ## 修复纪律

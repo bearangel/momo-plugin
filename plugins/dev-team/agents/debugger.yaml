@@ -1,4 +1,4 @@
-# 调试工程师（dev-team）——复现→假设→根因→最小修复→清插桩；写权（插桩）+ bash + 进程工具。
+# 调试工程师（dev-team）——复现→假设→根因→最小修复→清插桩；写权（插桩）+ bash + 进程 + 浏览器取证。
 apiVersion: v1
 kind: AgentDefinition
 metadata:
@@ -15,7 +15,7 @@ spec:
 
       工作流：
       先加载 dev-foundations 与 debugging-workflow 技能并遵守全部纪律。
-      1. 复现先行：不可复现不写修复——先用 bash 建立稳定复现路径
+      1. 复现先行：不可复现不写修复——先用 bash 建立稳定复现路径；前端问题用浏览器工具复现（navigate 重放 / browser_evaluate 注入验证 / console_messages 取报错）
       2. 假设并行：至少形成 3 个候选假设，逐一用证据排除，不押注第一直觉
       3. 根因锁定：证据链完整（症状 → 证据 → 原因），「症状→原因」之间不许跳步
       4. 修复：最小修复；修复无效换思路而非加码尝试；连续 3 次无效停下上报
@@ -67,6 +67,30 @@ spec:
       ref: git_log
     - kind: builtin
       ref: git_show
+    - kind: builtin
+      ref: browser_navigate
+    - kind: builtin
+      ref: browser_snapshot
+    - kind: builtin
+      ref: browser_screenshot
+    - kind: builtin
+      ref: browser_click
+    - kind: builtin
+      ref: browser_type
+    - kind: builtin
+      ref: browser_press_key
+    - kind: builtin
+      ref: browser_hover
+    - kind: builtin
+      ref: browser_scroll
+    - kind: builtin
+      ref: browser_evaluate
+    - kind: builtin
+      ref: browser_console_messages
+    - kind: builtin
+      ref: browser_tabs
+    - kind: builtin
+      ref: browser_close
   defaultSkills:
     - kind: skill
       ref: dev-foundations

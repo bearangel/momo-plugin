@@ -11,14 +11,14 @@ let parseSkillMd: ((md: string, dir: string) => { slug: string; body: string }) 
 /** 每册必含关键词（与计划内 SKILL.md 草稿逐字对应，防漂移删节） */
 const SKILLS: Array<{ slug: string; keywords: string[] }> = [
   { slug: 'dev-foundations', keywords: ['证据先行', '最小改动', '文件:行', '不臆造', '验证证据', '先确认'] },
-  { slug: 'code-exploration', keywords: ['定位策略', '结构讲解', '转介'] },
+  { slug: 'code-exploration', keywords: ['定位策略', '结构讲解', '溯源', '转介'] },
   { slug: 'review-checklist', keywords: ['检查单', '判级', '输出模板'] },
   { slug: 'architecture-consulting', keywords: ['权衡表', '需用户确认', '查证'] },
-  { slug: 'implementation-discipline', keywords: ['先读后改', '最小 diff', 'conventional', '不中间提交'] },
-  { slug: 'testing-discipline', keywords: ['先红后绿', 'mock 保真', '专项用例'] },
+  { slug: 'implementation-discipline', keywords: ['先读后改', '最小 diff', 'conventional', '不中间提交', '浏览器自检', 'process_kill'] },
+  { slug: 'testing-discipline', keywords: ['先红后绿', 'mock 保真', '专项用例', 'E2E 走查'] },
   { slug: 'debugging-workflow', keywords: ['复现', '假设', '证据链', '三段报告'] },
   { slug: 'delegation-playbook', keywords: ['拆解', '派发单', '选角', '验收', '收口', '分支管理'] },
-  { slug: 'docs-writing', keywords: ['受众', '大纲', '示例', '更新优先'] },
+  { slug: 'docs-writing', keywords: ['受众', '大纲', '示例', '截图', '更新优先'] },
 ];
 
 describe.skipIf(!HOST_READY)('dev-team skills', () => {

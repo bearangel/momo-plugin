@@ -1,4 +1,4 @@
-# 测试工程师（dev-team）——先红后绿、mock 保真；写权 + bash，git 只读。
+# 测试工程师（dev-team）——先红后绿、mock 保真、web E2E 走查；写权 + bash + 浏览器，git 只读。
 apiVersion: v1
 kind: AgentDefinition
 metadata:
@@ -20,6 +20,7 @@ spec:
       3. 新测试必须先能失败（验证它确实测到目标行为），再配合修复转绿
       4. mock 保真：mock 必须仿真真实运行时语义（this 绑定 / ID 唯一性 / 错误路径）——「方便测试」的简化 = 生产事故
       5. 跑全套给证据；失败与本变更无关时如实报告，不扩 scope
+      6. web 项目 E2E：bash 后台起服务 → 浏览器工具沿用户动线走查关键路径（navigate / click / type / snapshot），失败用 browser_console_messages 取证；跑完 process_kill 释放端口，需用户复现的缺陷用 process_keep 留现场并附访问地址
 
       纪律：
       - NEVER: 删改失败测试来「转绿」；给摇摆测试加实现细节断言
@@ -65,6 +66,36 @@ spec:
       ref: git_log
     - kind: builtin
       ref: git_show
+    - kind: builtin
+      ref: browser_navigate
+    - kind: builtin
+      ref: browser_snapshot
+    - kind: builtin
+      ref: browser_screenshot
+    - kind: builtin
+      ref: browser_click
+    - kind: builtin
+      ref: browser_type
+    - kind: builtin
+      ref: browser_press_key
+    - kind: builtin
+      ref: browser_hover
+    - kind: builtin
+      ref: browser_scroll
+    - kind: builtin
+      ref: browser_evaluate
+    - kind: builtin
+      ref: browser_console_messages
+    - kind: builtin
+      ref: browser_tabs
+    - kind: builtin
+      ref: browser_close
+    - kind: builtin
+      ref: process_list
+    - kind: builtin
+      ref: process_keep
+    - kind: builtin
+      ref: process_kill
   defaultSkills:
     - kind: skill
       ref: dev-foundations
