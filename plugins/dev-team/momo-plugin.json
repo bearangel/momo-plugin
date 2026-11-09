@@ -1,0 +1,10 @@
+{
+  "id": "dev-team",
+  "name": "研发团队",
+  "version": "0.1.0",
+  "description": "研发辅助 agent 阵：只读组（探索/评审/架构顾问）+ 执行组（实现/测试/调试）+ 编排（研发队长）+ 交付（文档工程师），最小授权 + 方法论纪律",
+  "components": {
+    "agents": "./agents",
+    "skills": "./skills"
+  }
+}
