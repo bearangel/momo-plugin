@@ -8,6 +8,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const Module = require('node:module');
+const { fileURLToPath } = require('node:url');
 
 const [, , workspaceDir, scriptPath, vendorRoot] = process.argv;
 if (!workspaceDir || !scriptPath || !vendorRoot) {
@@ -117,11 +118,29 @@ const READ_PREFIXES = [path.resolve(workspaceDir), os.tmpdir(), path.resolve(ven
   .map((p) => realPath(p) + path.sep);
 
 /**
+ * 守卫入参归一到文件系统路径：Node 24 的 require(esm) / ESM loader 会以
+ * `file:///...` URL（URL 实例或字符串）调用 fs.readFileSync —— String(url) 是
+ * 带 scheme 的裸串，path.resolve 会把它拼到 CWD 后面（Windows 下更会产出
+ * `D:\...\file:\D:\...` 这种畸形前缀），白名单比对必然落空 → 合法读被误杀
+ * （office-pro vendor 里 generator-function 等 ESM 依赖即此路径）。故先 fileURLToPath。
+ */
+function toFsPath(target) {
+  if (target instanceof URL) {
+    try { return fileURLToPath(target); } catch (_e) { return String(target); }
+  }
+  const raw = String(target);
+  if (/^file:\/\//i.test(raw)) {
+    try { return fileURLToPath(raw); } catch (_e) { return raw; }
+  }
+  return raw;
+}
+
+/**
  * 守卫用路径解析：叶面符号链接链（≤8 级防环）解引用至真实目标；目标不存在时
  * 按「已存在最近祖先 realpath + 余段」解析（悬空链/新建文件都落到真实前缀域）。
  */
 function resolveForGuard(target) {
-  let abs = path.resolve(String(target));
+  let abs = path.resolve(toFsPath(target));
   for (let i = 0; i < 8; i += 1) {
     let st = null;
     try { st = fs.lstatSync(abs); } catch (_e) { break; }
@@ -217,16 +236,31 @@ for (const name of ['writeSync', 'write', 'writevSync', 'writev']) {
 
 // 流族：createWriteStream 落点检查。对象形态取 opts.path（Node 必填），
 // 字符串/Buffer 形态直接交 assertWritable（内部 String() 归一）。
+// 同时在册「在途写流」：脚本的 promise resolve 后仍有流未 flush 时先等它们收口，
+// 否则 process.exit 会把 pdfkit 这类 pipe 式产物截断成 0 字节（读方 validate 必红）。
+const activeWriteStreams = new Set();
 const origCreateWriteStream = fs.createWriteStream;
 fs.createWriteStream = function guardedCreateWriteStream(p, ...args) {
   const target = p && typeof p === 'object' && !Buffer.isBuffer(p) && 'path' in p ? p.path : p;
   assertWritable(target);
   const ws = origCreateWriteStream.call(fs, p, ...args);
+  activeWriteStreams.add(ws);
+  const drop = () => activeWriteStreams.delete(ws);
+  ws.once('close', drop);
+  ws.once('error', drop);
   // 流内部写入走 fd（fs.write 已按 fd 白名单守卫）：open 事件后登记 fd。
   // open 前 ws.fd 为 null，不存在「未登记即写」的窗口（终审复审 #2 已核对）。
   ws.once('open', (fd) => allowedWriteFds.add(fd));
   return ws;
 };
+
+/** 等在途写流收口（上限 10s——脚本故意不 end 的流不让子进程无限挂） */
+async function flushWriteStreams(timeoutMs = 10000) {
+  const deadline = Date.now() + timeoutMs;
+  while (activeWriteStreams.size > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 // callback 形态（终审 B1）：fs.writeFile(path, data, cb) 等回调 API 与 sync/promises
 // 同语义守卫——路径在首参，rename/copyFile 查目标（第 2 参）。
@@ -302,6 +336,7 @@ fsp.link = function guardedLink(existing, p, ...args) {
     `"use strict";\nreturn (async () => {\n${code}\n})();`,
   );
   await runner(require, moduleObj, moduleObj.exports, scriptPath, path.dirname(scriptPath));
+  await flushWriteStreams();
   process.exit(0);
 })().catch((err) => {
   console.error(err && err.stack ? err.stack : String(err));
