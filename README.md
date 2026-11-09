@@ -15,6 +15,7 @@ tests/               # 跨仓测试（依赖 sibling 宿主，见下）
 
 - `codegraph`（代码图谱，v2.0.1）
 - `office-pro`（office 文档生成代码工坊：run_js 沙箱执行 + office-authoring 方法论 + 文档工程师预置；vendor 需先跑 `plugins/office-pro/scripts/build.sh` 构建）
+- `dev-team`（研发团队，v0.1.0）—— 8 个研发辅助 agent（只读组：探索/评审/架构顾问；执行组：实现/测试/调试；编排：研发队长统一收口提交；交付：文档工程师）+ 9 册方法论 skills；设计 spec 见 momo-studio `docs/specs/2026-11-09-dev-team-plugin-design.md`
 
 office-pro 说明：其 `run-js` / `generation-smoke` 测试依赖宿主的 `execSandboxed` 设施（已合入 momo-studio main，commit a9c32744）——宿主 checkout 在位即真跑全绿。
 
