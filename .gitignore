@@ -1,4 +1,5 @@
 node_modules/
+dist-release/
 plugins/codegraph/engine/
 plugins/codegraph/vendor/
 plugins/office-pro/vendor/node_modules/
