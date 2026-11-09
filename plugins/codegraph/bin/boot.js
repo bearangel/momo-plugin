@@ -30,8 +30,29 @@ const codegraphDir = process.env.CODEGRAPH_DIR || '.codegraph';
 const indexDir = path.join(root, codegraphDir);
 const needInit = !fs.existsSync(indexDir);
 
+/**
+ * 引擎启动器解析（win32 平台适配）：
+ *   上游 win32 分发只有 bin/codegraph（sh 包装）与 bin/codegraph.cmd（cmd 包装），
+ *   而 Node ≥20.12 起 spawn .cmd/.bat 必须显式 shell（CVE-2024-27980 后的硬拒绝），
+ *   shell 又引入引号/注入面。这里直接改用引擎自带的 node.exe + lib 入口
+ *   （免 shell、免扩展名限制）；darwin/linux 仍原样 spawn --engine 传入的启动器，
+ *   行为零变化。
+ */
+function resolveEngineLauncher(enginePath) {
+  if (process.platform === 'win32') {
+    const engineRoot = path.resolve(path.dirname(enginePath), '..');
+    const nodeExe = path.join(engineRoot, 'node.exe');
+    const jsEntry = path.join(engineRoot, 'lib', 'dist', 'bin', 'codegraph.js');
+    if (fs.existsSync(nodeExe) && fs.existsSync(jsEntry)) {
+      return { cmd: nodeExe, lead: [jsEntry] };
+    }
+  }
+  return { cmd: enginePath, lead: [] };
+}
+const launcher = resolveEngineLauncher(engine);
+
 // stdout/stderr 直通宿主管道；stdin 由本进程转发（EOF 感知 + 数据不抢读）
-const child = spawn(engine, ['serve', '--mcp', '--path', root], {
+const child = spawn(launcher.cmd, [...launcher.lead, 'serve', '--mcp', '--path', root], {
   stdio: ['pipe', 'inherit', 'inherit'],
   env: process.env,
 });
@@ -59,6 +80,9 @@ child.stdin.on('error', () => undefined); // engine 先退时管道破裂忽略
 
 // 首启建图与 serve 并行（I5：不再阻塞握手）
 if (needInit) {
-  const initChild = spawn(engine, ['init', root, '-y'], { stdio: 'ignore', env: process.env });
+  const initChild = spawn(launcher.cmd, [...launcher.lead, 'init', root, '-y'], {
+    stdio: 'ignore',
+    env: process.env,
+  });
   initChild.on('error', () => undefined); // init 失败交由 serve 面暴露
 }
