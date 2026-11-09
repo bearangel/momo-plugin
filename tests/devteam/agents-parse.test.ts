@@ -26,6 +26,12 @@ interface ParsedDef {
 let parse: ((yaml: string) => { def: ParsedDef }) | null = null;
 let allBuiltinTools: string[] = [];
 
+/** 提示词形状守卫：非空行 ≥9——折叠标量（| 误写为 >）或手工拼行会把整段压成 3-4 行，此守卫必炸 */
+function assertPromptShape(prompt: string): void {
+  const lineCount = prompt.split('\n').filter((l) => l.trim().length > 0).length;
+  expect(lineCount, `systemPrompt 非空行数 ${lineCount} < 9，疑似折叠/单行化`).toBeGreaterThanOrEqual(9);
+}
+
 describe.skipIf(!HOST_READY)('dev-team agents 解析锁', () => {
   beforeAll(async () => {
     parse = ((await hostImport('agent/manifest-parser.ts')) as unknown as {
@@ -64,11 +70,24 @@ describe.skipIf(!HOST_READY)('dev-team agents 解析锁', () => {
       const { def } = parseSlug(slug);
       expect(def.defaultSkills.map((s) => s.ref)[0]).toBe('dev-foundations');
       expect(def.defaultSkills).toHaveLength(2);
-      // 块标量缩进坏 → prompt 单行化，两个不同行的锚点不可能同时在
+      // 锚点断言防截断（丢 NEVER/ALWAYS 行必挂）；行数断言防线折叠/单行化
+      //（| 误写为 > 时 toContain 仍全通过——两锁互补，反例见折叠反例用例）
       expect(def.systemPrompt).toContain('先加载 dev-foundations');
       expect(def.systemPrompt).toContain('NEVER');
+      assertPromptShape(def.systemPrompt);
       expect(def.modelName.length).toBeGreaterThan(0);
       expect(def.modelProviderId).toBeNull(); // 绑定留空 → resolveModelBinding 走全局默认聊天模型
     }
+  });
+
+  it('守卫反例：折叠标量（| 误写为 >）单行化的 prompt 必须被行数断言拒绝', () => {
+    const raw = fs.readFileSync(path.join(PLUGIN_ROOT, 'agents', 'implementer.yaml'), 'utf-8');
+    const folded = raw.replace('systemPrompt: |', 'systemPrompt: >');
+    const { def } = parse!(folded);
+    // 旧锁盲区实证：折叠后两个锚点仍然在（toContain 不感知行结构）
+    expect(def.systemPrompt).toContain('先加载 dev-foundations');
+    expect(def.systemPrompt).toContain('NEVER');
+    // 新守卫必须捕获
+    expect(() => assertPromptShape(def.systemPrompt)).toThrow();
   });
 });
