@@ -20,6 +20,8 @@
   .folder:hover, .folder.on { background: var(--s2); color: var(--tx); }
   .folder .n { color: var(--tx3); }
   .toolbar { display: flex; gap: 6px; padding: 8px; border-bottom: 1px solid var(--bd); }
+  .col-left .toolbar { flex-direction: column; align-items: stretch; }
+  .col-left .toolbar button { white-space: nowrap; }
   input, select, textarea { font: inherit; border: 1px solid var(--bd); border-radius: 5px; padding: 4px 8px; background: var(--bg); color: var(--tx); min-width: 0; }
   .mail { padding: 7px 10px; border-bottom: 1px solid var(--bd); cursor: pointer; }
   .mail:hover, .mail.on { background: var(--s1); }
@@ -54,7 +56,7 @@
 </head>
 <body>
   <div class="col-left">
-    <div class="toolbar"><button class="pri" onclick="openAccountForm('add')">+ 添加账号</button><button onclick="openAccountForm('edit')">编辑当前账号</button></div>
+    <div class="toolbar"><button class="pri" onclick="openAccountForm('add')">+ 添加帐号</button><button onclick="openAccountForm('edit')">编辑帐号</button></div>
     <div id="folders"></div>
   </div>
   <div class="col-mid">
@@ -146,7 +148,7 @@
   window.call = call;
 
   // 状态
-  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null, composeBusy: false, editId: null, reqSeq: 0 };
+  var S = { accounts: [], accId: null, folders: null, folder: 'INBOX', page: 1, pageSize: 20, total: 0, mails: [], testOk: false, showRemoteImages: false, curMail: null, composeBusy: false, editId: null, reqSeq: 0, remoteOverride: null };
   var PRESETS = {
     qq: { ih: 'imap.qq.com', ip: 993, it: 'tls', sh: 'smtp.qq.com', sp: 465, st: 'tls' },
     '163': { ih: 'imap.163.com', ip: 993, it: 'tls', sh: 'smtp.163.com', sp: 465, st: 'tls' },
@@ -311,7 +313,8 @@
     return 'default-src \'none\'; img-src data: cid:' + (allowRemote ? ' https: http:' : '') + '; style-src \'unsafe-inline\'';
   }
   function toggleRemoteImages() {
-    S.showRemoteImages = !S.showRemoteImages;
+    S.remoteOverride = !S.showRemoteImages;
+    S.showRemoteImages = S.remoteOverride;
     if (S.curMail) renderMail(S.curMail);
   }
   function renderMail(m) {
@@ -338,7 +341,11 @@
   function openMail(uid) {
     uid = Number(uid);
     S.selUid = uid;
-    S.showRemoteImages = false;
+    // 远程图片默认值每次开信重读配置（设置页改开关即生效）；面板内按钮只做会话级覆盖
+    call('config.get', {}).then(function (cfg) {
+      S.showRemoteImages = S.remoteOverride != null ? S.remoteOverride : !!(cfg && cfg.showRemoteImages);
+      if (S.curMail) renderMail(S.curMail);
+    }).catch(function () {});
     S.curMail = null;
     renderList(true);
     $('reader').innerHTML = '<p class="hint" style="padding:14px">读取中…</p>';

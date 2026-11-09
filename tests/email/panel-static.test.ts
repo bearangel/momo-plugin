@@ -48,7 +48,7 @@ describe.skipIf(!HOST_READY)('email panel', () => {
       'sandbox=""', 'Content-Security-Policy', 'typeof m.html === \'string\'', 'Promise.all',
       'id="f-retention"', '<option value="forever">', '<option value="1y">', '<option value="6m">', '<option value="1m">',
       '写邮件', 'id="compose"', 'id="c-files"', 'type="file"', '存草稿', 'drafts.save', 'drafts.send',
-      '编辑当前账号', "openAccountForm('edit')", 'readOnly = true', '留空则不修改', 'accounts.update',
+      '编辑帐号', "openAccountForm('edit')", 'readOnly = true', '留空则不修改', 'accounts.update',
       'needsRetest', 'S.testOk !== true && needsRetest()',
       'sync-status', 'S.reqSeq', 'scrollTop', "call('folders.peek'", "call('mails.peek'",
       '离线：显示上次数据', '更新中…',
@@ -97,5 +97,16 @@ describe('面板存储入口已移除（2026-11-05 配置迁移裁定：管理�
     expect(html).not.toContain('archive.getSettings');
     expect(html).not.toContain('archive.clear');
     expect(html).toContain("call('config.get'");
+  });
+});
+
+describe('工具栏文案与远程图片默认值（2026-11-05 优化反馈）', () => {
+  it('按钮文案：添加帐号/编辑帐号（无「编辑当前账号」）；无逐封重置', () => {
+    const html = fs.readFileSync(path.join(PLUGIN_ROOT, 'panel/index.html'), 'utf-8');
+    expect(html).toContain('添加帐号');
+    expect(html).toContain('编辑帐号');
+    expect(html).not.toContain('编辑当前账号');
+    expect(html).not.toContain('S.showRemoteImages = false;');
+    expect(html).toContain('S.remoteOverride');
   });
 });
