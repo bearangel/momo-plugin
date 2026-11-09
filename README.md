@@ -56,3 +56,37 @@ npx pnpm@9.0.0 test              # 引擎在位则真跑；缺失则 skip
   → 测试 skip 而非静默回退）
 - **耦合警告**：宿主重构改动上述内部模块 API 时，本仓测试需同步修改——这是
   有意保留的耦合面（spec D2），README 即契约
+
+## 行尾纪律（LF）
+
+本仓 `.gitattributes` 钉死 `* text=auto eol=lf`。原因：宿主 `parseSkillMd` 按 `\n`
+切分 frontmatter，Windows 机器 `core.autocrlf=true` 检出成 CRLF 会让 SKILL.md
+解析失败（症状：插件装上但技能列表空）。二进制后缀显式标 `binary` 不做转换。
+
+Windows 上已有 clone 若发现工作区是 CRLF，执行一次：
+
+```bash
+git rm --cached -r . && git reset --hard
+```
+
+## 打包离线分发包（Windows）
+
+```powershell
+pwsh -File scripts/build-plugin-packages.ps1
+```
+
+产物落 `dist-release/`（gitignored）：每个插件一个「解压即可 dev 装载」的目录 +
+同名 zip + `SHA256SUMS.txt`。脚本做四件事：
+
+1. 复制 `plugins/*` 为插件根；
+2. **codegraph 生成 Windows 变体**：manifest 只声明 `vendor/codegraph-win32-x64.tar.gz`
+   （sha256 自动回填）——宿主安装器会把声明的**全部** vendor 归档解压进同一个
+   `engine/`，多平台归档共存必坏；`mcp.json` 的 `command` 改
+   `${pluginRoot}/engine/node.exe`（宿主 `${engineNode}` 在 win32 解析到无扩展名的
+   `engine/node`，Windows spawn 不了）；
+3. office-pro 补中文字体（取自宿主 checkout 的 `electron/resources/fonts/`）；
+4. 插件自有文本（md/json/yaml/js/html/css）行尾归一 **LF**，跳过 `engine/` 与
+   `node_modules/`。
+
+前置：`plugins/codegraph/engine/` 与 `vendor/codegraph-win32-x64.tar.gz` 需先就位
+（见上节「本机产物」）。
