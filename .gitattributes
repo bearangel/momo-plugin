@@ -1,0 +1,33 @@
+# 统一行尾纪律（2026-11-09）
+#
+# 为什么：宿主 parseSkillMd 等解析器按 \n 切分 frontmatter，Windows 机器上
+# core.autocrlf=true 会把 checkout 变成 CRLF —— 插件装上了但技能列表空。
+# 这里显式钉死 LF，让任何平台检出的结果一致；二进制显式标 binary，
+# 避免被当成文本做行尾转换。
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.bmp binary
+*.webp binary
+
+*.zip binary
+*.gz binary
+*.tgz binary
+*.7z binary
+*.tar binary
+*.exe binary
+*.node binary
+*.dll binary
+*.so binary
+*.dylib binary
+
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.pdf binary
+*.wasm binary
