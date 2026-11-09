@@ -81,9 +81,12 @@ pwsh -File scripts/build-plugin-packages.ps1
 1. 复制 `plugins/*` 为插件根；
 2. **codegraph 生成 Windows 变体**：manifest 只声明 `vendor/codegraph-win32-x64.tar.gz`
    （sha256 自动回填）——宿主安装器会把声明的**全部** vendor 归档解压进同一个
-   `engine/`，多平台归档共存必坏；`mcp.json` 的 `command` 改
-   `${pluginRoot}/engine/node.exe`（宿主 `${engineNode}` 在 win32 解析到无扩展名的
-   `engine/node`，Windows spawn 不了）；
+   `engine/`，多平台归档共存必坏；`mcp.json` **保持仓库原样**（`${engineNode}` /
+   `${engineBin}`），由宿主 `template-expand` 按平台解析（win32 → `engine/node.exe`
+   + `engine/bin/codegraph.cmd`）。切勿在打包时把 command 改写成
+   `${pluginRoot}/engine/node.exe`：`mcp-sync` 的 stdio 命令校验只放行「整串占位符」
+   或合法 npm 包名，带前缀路径会被判非法 → MCP 不注册（表现：插件装了但看不到
+   MCP、也不能给 agent 授权）；
 3. office-pro 补中文字体（取自宿主 checkout 的 `electron/resources/fonts/`）；
 4. 插件自有文本（md/json/yaml/js/html/css）行尾归一 **LF**，跳过 `engine/` 与
    `node_modules/`。

@@ -102,24 +102,11 @@ $null = New-Package $cgSrc $cgName {
     probe    = "engine/bin/codegraph"
   }
   $m | ConvertTo-Json -Depth 32 | Set-Content (Join-Path $t "momo-plugin.json") -Encoding utf8
-  @'
-{
-  "servers": {
-    "codegraph": {
-      "command": "${pluginRoot}/engine/node.exe",
-      "args": [
-        "${pluginRoot}/bin/boot.js",
-        "--engine", "${pluginRoot}/engine/bin/codegraph.cmd",
-        "--root", "${config.workspaceRoot}"
-      ],
-      "env": {
-        "CODEGRAPH_NO_DOWNLOAD": "1",
-        "CODEGRAPH_DIR": ".momo-codegraph"
-      }
-    }
-  }
-}
-'@ | Set-Content (Join-Path $t "mcp/mcp.json") -Encoding utf8
+  # mcp.json 保持仓库原样（command = ${engineNode}，args 用 ${engineBin}）——宿主
+  # template-expand 已按平台解析：win32 → engine/node.exe + engine/bin/codegraph.cmd。
+  # 不要在这里改写成 ${pluginRoot}/...：mcp-sync 的 stdio 命令校验只放行「整串占位符」
+  # 或合法 npm 包名，带前缀的路径会被判非法 → MCP 不注册（表现为「插件装了但看不到
+  # MCP，也不能给 agent 授权」）。
   "  codegraph vendor sha = $sha"
 } -excludeDirs @((Join-Path $cgSrc "engine"))
 
