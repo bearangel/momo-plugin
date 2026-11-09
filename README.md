@@ -89,4 +89,15 @@ pwsh -File scripts/build-plugin-packages.ps1
    `node_modules/`。
 
 前置：`plugins/codegraph/engine/` 与 `vendor/codegraph-win32-x64.tar.gz` 需先就位
-（见上节「本机产物」）。
+（见上节「本机产物」）。**zip 里刻意不带已解压的 `engine/`**——宿主 zip 安装会在
+`finalizePluginInstall` 里从 vendor 归档解压出 `engine/`，两样都带会把解压总量翻倍
+（253MB 引擎 + 53MB 归档 = 303MB，直接撞 200MB 解压上限）。若要「开发目录装载」，
+先自己解压归档：
+
+```bash
+tar -xzf vendor/codegraph-win32-x64.tar.gz -C engine
+```
+
+体积/条目预算（宿主 `installer.ts` 守卫）：解压总量 ≤ 200MB、zip 条目 ≤ 20000
+（后者由 5000 上调，原因就是 office-pro 这类 vendor 内置 224 个 npm 包、7000+ 文件的
+真实插件会被误杀）。

@@ -65,13 +65,15 @@ function Convert-ToLf([string]$dir) {
   "  LF normalized: $count files"
 }
 
-function New-Package([string]$srcDir, [string]$name, [scriptblock]$postCopy) {
+function New-Package([string]$srcDir, [string]$name, [scriptblock]$postCopy, [string[]]$excludeDirs = @()) {
   $target = Join-Path $dist $name
   Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force $target | Out-Null
   # robocopy 而非 Copy-Item：后者对「含子目录的 wildcard 源 → 新目标」会报
   # "Container cannot be copied onto existing leaf item"，且长路径更稳
-  robocopy $srcDir $target /E /NFL /NDL /NJH /NJS /NP | Out-Null
+  $rcArgs = @($srcDir, $target, "/E", "/NFL", "/NDL", "/NJH", "/NJS", "/NP")
+  if ($excludeDirs.Count -gt 0) { $rcArgs += "/XD"; $rcArgs += $excludeDirs }
+  robocopy @rcArgs | Out-Null
   if ($LASTEXITCODE -ge 8) { throw "robocopy 失败：$srcDir -> $target (exit $LASTEXITCODE)" }
   if ($postCopy) { & $postCopy $target }
   Convert-ToLf $target
@@ -79,6 +81,10 @@ function New-Package([string]$srcDir, [string]$name, [scriptblock]$postCopy) {
 }
 
 # ---- 1. codegraph（Windows 变体）----
+# 刻意【不】把已解压的 engine/ 打进 zip：宿主 zip 安装会在 finalizePluginInstall 里
+# 从 vendor 归档解压出 engine/，两样都带 = 解压总量翻倍（engine 253MB + 归档 53MB
+# = 303MB）直接撞 200MB 解压上限。只带归档 → 解压总量 ~53MB。
+# dev 目录装载场景需先自己解压归档：tar -xzf vendor/codegraph-win32-x64.tar.gz -C engine
 $cgSrc = Join-Path $plugins "codegraph"
 $cgManifest = Read-Manifest $cgSrc
 $cgName = "codegraph-$($cgManifest.version)-win32-x64"
@@ -115,7 +121,7 @@ $null = New-Package $cgSrc $cgName {
 }
 '@ | Set-Content (Join-Path $t "mcp/mcp.json") -Encoding utf8
   "  codegraph vendor sha = $sha"
-}
+} -excludeDirs @((Join-Path $cgSrc "engine"))
 
 # ---- 2. email ----
 $emManifest = Read-Manifest (Join-Path $plugins "email")
