@@ -17,7 +17,7 @@ const SKILLS: Array<{ slug: string; keywords: string[] }> = [
   { slug: 'implementation-discipline', keywords: ['先读后改', '最小 diff', 'conventional', '不中间提交'] },
   { slug: 'testing-discipline', keywords: ['先红后绿', 'mock 保真', '专项用例'] },
   { slug: 'debugging-workflow', keywords: ['复现', '假设', '证据链', '三段报告'] },
-  { slug: 'delegation-playbook', keywords: ['拆解', '派发单', '选角', '验收', '收口'] },
+  { slug: 'delegation-playbook', keywords: ['拆解', '派发单', '选角', '验收', '收口', '分支管理'] },
   { slug: 'docs-writing', keywords: ['受众', '大纲', '示例', '更新优先'] },
 ];
 

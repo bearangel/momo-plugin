@@ -25,7 +25,7 @@ const EXPECTED: Record<string, string[]> = {
   implementer: [...READ5, ...WRITE5, 'apply_patch', 'bash', 'webfetch', 'todowrite', ...GIT_RO5, ...GIT_RW5],
   'test-engineer': [...READ5, ...WRITE5, 'apply_patch', 'bash', 'todowrite', ...GIT_RO5],
   debugger: [...READ5, 'edit_file', 'write_file', 'mkdir', 'bash', 'webfetch', ...PROCESS3, 'todowrite', ...GIT_RO5],
-  'dev-lead': [...READ5, ...GIT_RO5, 'git_add', 'git_commit', ...DELEGATION10, 'todowrite', 'memory_save', 'memory_search'],
+  'dev-lead': [...READ5, ...GIT_RO5, ...GIT_RW5, ...DELEGATION10, 'todowrite', 'memory_save', 'memory_search'],
   'docs-writer': [...READ5, ...WRITE5, ...OFFICE_RO3, ...GIT_RO5],
 };
 
@@ -57,14 +57,12 @@ describe.skipIf(!HOST_READY)('dev-team 工具授予矩阵锁', () => {
     }
   });
 
-  it('结构性断言：收口提交（add/commit）仅 implementer 与 dev-lead；仓库形状（branch/checkout/stash）仅 implementer', () => {
+  it('结构性断言：git 写权 5 件（add/commit/branch/checkout/stash）仅 implementer 与 dev-lead', () => {
     for (const slug of Object.keys(EXPECTED)) {
       const refs = refsOf(slug);
-      const commitOk = slug === 'implementer' || slug === 'dev-lead';
-      expect(refs.includes('git_add'), slug).toBe(commitOk);
-      expect(refs.includes('git_commit'), slug).toBe(commitOk);
-      const shape = ['git_branch', 'git_checkout', 'git_stash'].filter((t) => refs.includes(t));
-      expect(shape, slug).toHaveLength(slug === 'implementer' ? 3 : 0);
+      const gitWriteOk = slug === 'implementer' || slug === 'dev-lead';
+      const hit = GIT_RW5.filter((t) => refs.includes(t));
+      expect(hit, slug).toHaveLength(gitWriteOk ? GIT_RW5.length : 0);
     }
   });
 
