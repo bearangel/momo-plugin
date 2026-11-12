@@ -134,7 +134,8 @@
     parent.postMessage(Object.assign({ type: type, id: id }, extra || {}), '*');
     return new Promise(function (resolve, reject) {
       pending[id] = { resolve: resolve, reject: reject };
-      setTimeout(function () { if (pending[id]) { pending[id].reject(new Error('rpc 超时')); delete pending[id]; } }, 30000);
+      // 60s：patient 读信（大邮件慢链路）需要比旧 30s 更长的预算
+      setTimeout(function () { if (pending[id]) { pending[id].reject(new Error('rpc 超时')); delete pending[id]; } }, 60000);
     });
   }
   window.addEventListener('message', function (ev) {
@@ -338,6 +339,19 @@
     }
     $('reader').innerHTML = h;
   }
+  // 点击读信即时去未读标记：本地信封 seen 置真 + 文件夹未读数减 1
+  //（服务器侧由 service 读信后 best-effort 置 \Seen；未读数下次 folders.list 自然校正）。
+  function markSeenLocal(uid) {
+    var hit = null;
+    for (var i = 0; i < S.mails.length; i += 1) { if (Number(S.mails[i].uid) === uid) { hit = S.mails[i]; break; } }
+    if (!hit || hit.seen) return;
+    hit.seen = true;
+    if (S.folders && S.folders.unseen && Number(S.folders.unseen[S.folder]) > 0) {
+      S.folders.unseen[S.folder] = Number(S.folders.unseen[S.folder]) - 1;
+      renderAccounts();
+    }
+    renderList(true);
+  }
   function openMail(uid) {
     uid = Number(uid);
     S.selUid = uid;
@@ -349,8 +363,10 @@
     S.curMail = null;
     renderList(true);
     $('reader').innerHTML = '<p class="hint" style="padding:14px">读取中…</p>';
-    call('mails.get', { accountId: S.accId, folder: S.folder, uid: uid }).then(function (m) {
+    // patient：大邮件走 service 25s 慢预算（面板 RPC 自身 60s 兜底）
+    call('mails.get', { accountId: S.accId, folder: S.folder, uid: uid, patient: true }).then(function (m) {
       S.curMail = m;
+      markSeenLocal(uid);
       renderMail(m);
     }).catch(function (e) { $('reader').innerHTML = '<p class="hint" style="padding:14px;color:var(--err)">' + esc(e.message) + '</p>'; });
   }

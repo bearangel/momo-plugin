@@ -30,6 +30,7 @@ describe.skipIf(!HOST_READY)('email panel', () => {
       'accounts.add', 'accounts.test', 'accounts.delete',
       'mails.list', 'mails.refresh', 'mails.get',
       'drafts.send', 'drafts.discard',
+      'patient: true', 'markSeenLocal',
     ]) {
       expect(html).toContain(anchor);
     }
