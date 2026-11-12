@@ -1,13 +1,13 @@
-// save_attachment：邮件附件保存到工作区（wsFs 边界 + 变更记账；10MB 双守门第二道）。
+// save_attachment：邮件附件保存到工作区。字节经 service 临时文件中转（2026-11-11）：
+// 桥只传 tmpPath，工具侧做 wsFs 边界 + Read-before-Edit 门禁 + 变更记账，拷贝后删临时文件。
+// 附件大小受整封邮件 ≤100MB 约束（载体上限），不再单设 10MB 守门。
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
 
-const ATTACH_MAX = 10 * 1024 * 1024;
-
 const DEF = {
   name: 'save_attachment',
-  description: '把邮件附件保存到当前工作区指定路径（相对路径）。单附件 ≤10MB。覆盖已存在文件需先读过该文件（Read-before-Edit 门禁）。',
+  description: '把邮件附件保存到当前工作区指定路径（相对路径）。附件大小受整封邮件 ≤100MB 约束。覆盖已存在文件需先读过该文件（Read-before-Edit 门禁）。',
   inputSchema: {
     type: 'object',
     properties: {
@@ -33,20 +33,26 @@ module.exports.createTools = function createTools(pctx) {
         throw new Error('save_attachment 需要宿主注入 wsFs（App 版本过旧或运行时未装配）——请升级 Momo Studio');
       }
       const att = await pctx.callService('attachments.get', { accountId: args.accountId, folder: args.folder, uid: args.uid, partId: args.partId });
-      const buf = Buffer.from(String(att.base64 || ''), 'base64');
-      if (buf.length > ATTACH_MAX) throw new Error(`附件超过 10MB 上限（${buf.length} 字节）`);
-      const abs = ctx.wsFs.assertInWorkspace(args.destPath);
-      const existed = fs.existsSync(abs);
-      if (existed && ctx.readTracker && typeof ctx.readTracker.assertRead === 'function') {
-        ctx.readTracker.assertRead(ctx.roomId, ctx.parentStreamSessionId, abs);
+      if (typeof att.tmpPath !== 'string' || att.tmpPath === '') throw new Error('附件中转路径缺失（服务返回异常）');
+      // 门禁失败（wsFs/readTracker 抛错）也必须清理中转文件——try 覆盖拿到 tmpPath 之后的一切路径
+      try {
+        const abs = ctx.wsFs.assertInWorkspace(args.destPath);
+        const existed = fs.existsSync(abs);
+        if (existed && ctx.readTracker && typeof ctx.readTracker.assertRead === 'function') {
+          ctx.readTracker.assertRead(ctx.roomId, ctx.parentStreamSessionId, abs);
+        }
+        const buf = fs.readFileSync(att.tmpPath);
+        const before = existed ? fs.readFileSync(abs) : null;
+        fs.mkdirSync(path.dirname(abs), { recursive: true });
+        fs.writeFileSync(abs, buf);
+        if (typeof ctx.recordFileChange === 'function') {
+          ctx.recordFileChange('plugin:email/save_attachment', args.destPath, existed ? 'modify' : 'create', before, buf);
+        }
+        return JSON.stringify({ saved: args.destPath, bytes: buf.length, filename: att.filename }, null, 2);
+      } finally {
+        // 拷贝完成（含任何失败）即删中转文件；删除失败留待 service 启动清扫兜底
+        try { fs.unlinkSync(att.tmpPath); } catch { /* 已删或不可删 */ }
       }
-      const before = existed ? fs.readFileSync(abs) : null;
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, buf);
-      if (typeof ctx.recordFileChange === 'function') {
-        ctx.recordFileChange('plugin:email/save_attachment', args.destPath, existed ? 'modify' : 'create', before, buf);
-      }
-      return JSON.stringify({ saved: args.destPath, bytes: buf.length, filename: att.filename }, null, 2);
     },
   };
 };

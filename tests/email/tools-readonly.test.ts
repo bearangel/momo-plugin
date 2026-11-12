@@ -1,7 +1,7 @@
 // tests/email/tools-readonly.test.ts
 // 模块形状（文件名=短名）/ callService 转发 / pageSize 钳制 / 参数缺失中文错误
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 const load = (f: string): { createTools(pctx: unknown): {
   getDefs(): Array<{ name: string; inputSchema: { type: string } }>;
@@ -11,7 +11,7 @@ const load = (f: string): { createTools(pctx: unknown): {
 } } => require(path.resolve(__dirname, '../../plugins/email/tools', f));
 
 function fakeCtx() {
-  const calls: Array<{ method: string; params: unknown }> = [];
+  const calls: Array<{ method: string; params: unknown; opts?: { timeoutMs?: number } }> = [];
   return {
     calls,
     getConfig: () => ({}),
@@ -60,6 +60,88 @@ describe('只读工具', () => {
     expect(ctx.calls[0]!.params).toMatchObject({ pageSize: 50, page: 1, folder: 'INBOX' });
     await tools.execute('list_mails', { accountId: 'a', pageSize: 0 });
     expect((ctx.calls[1]!.params as { pageSize: number }).pageSize).toBe(1);
+  });
+
+  it('read_mail：agent 视图——无 html 面、text 30K 截断、imageCount/htmlChars 透出', async () => {
+    const ctx = fakeCtx();
+    ctx.callService = async (method: string, params: unknown) => {
+      ctx.calls.push({ method, params });
+      return {
+        uid: 7, subject: 'S', from: 'a@b.c', to: 'x@y.z', date: '2026-11-11T00:00:00Z', seen: false,
+        text: 'x'.repeat(40000), textChars: 40000, textTruncated: false,
+        html: '<img src="data:image/png;base64,AAAA"><img src="b">', htmlChars: 12345, imageCount: 2,
+        attachments: [{ partId: '1.1', filename: 'a.pdf', contentType: 'application/pdf', size: 3 }],
+      };
+    };
+    const out = await load('read_mail.js').createTools(ctx).execute('read_mail', { accountId: 'a', folder: 'INBOX', uid: 7 });
+    const v = JSON.parse(out);
+    expect(v.imageCount).toBe(2);
+    expect(v.htmlChars).toBe(12345);
+    expect(v.textChars).toBe(40000);
+    expect(v.textTruncated).toBe(true);
+    expect(v.text).toContain('已截断');
+    expect(v.text.length).toBeLessThanOrEqual(30000 + 60);
+    expect(v.attachments).toHaveLength(1);
+    expect(v).not.toHaveProperty('html');
+    expect(JSON.stringify(v)).not.toContain('base64'); // 内嵌图片字节绝不过 agent 上下文
+  });
+
+  it('read_mail：短正文原样返回，不误标截断', async () => {
+    const ctx = fakeCtx();
+    ctx.callService = async (method: string, params: unknown) => {
+      ctx.calls.push({ method, params });
+      return { uid: 7, subject: 'S', from: 'a', to: 'b', date: 'd', seen: true, text: '正文', textChars: 2, htmlChars: 0, imageCount: 0, truncated: false, attachments: [] };
+    };
+    const v = JSON.parse(await load('read_mail.js').createTools(ctx).execute('read_mail', { accountId: 'a', folder: 'INBOX', uid: 7 }));
+    expect(v.text).toBe('正文');
+    expect(v.textTruncated).toBe(false);
+    expect(v.imageCount).toBe(0);
+  });
+
+  it('read_mail：大邮件 deferred → 轮询收敛返回 agent 视图', async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = fakeCtx();
+      const view = { uid: 7, subject: 'S', from: 'a', to: 'b', date: 'd', seen: false, text: '正文', textChars: 2, htmlChars: 0, imageCount: 0, truncated: false, attachments: [] };
+      const queue: unknown[] = [
+        { deferred: true, uid: 7, sizeBytes: 21 * 1024 * 1024, estimateSec: 18 },
+        { deferred: true, uid: 7, sizeBytes: 21 * 1024 * 1024, estimateSec: 18 },
+        view,
+      ];
+      ctx.callService = async (method: string, params: unknown, opts?: { timeoutMs?: number }) => {
+        ctx.calls.push({ method, params, opts });
+        return queue.shift() ?? view;
+      };
+      const pending = load('read_mail.js').createTools(ctx).execute('read_mail', { accountId: 'a', folder: 'INBOX', uid: 7 });
+      await vi.advanceTimersByTimeAsync(3000); // 第 1 次轮询
+      await vi.advanceTimersByTimeAsync(3000); // 第 2 次轮询 → 命中视图
+      const v = JSON.parse(await pending);
+      expect(v.text).toBe('正文');
+      expect(v.deferred).toBeUndefined();
+      // 每次调用都带 patient + warmup + 30s 桥提示（宿主 A 项契约消费面）
+      expect(ctx.calls[0]!.params).toMatchObject({ uid: 7, patient: true, warmup: true });
+      for (const c of ctx.calls) expect(c.opts).toEqual({ timeoutMs: 30000 });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('read_mail：60s 预算耗尽仍 deferred → 结构化「转入中」状态（不 throw）', async () => {
+    vi.useFakeTimers();
+    try {
+      const ctx = fakeCtx();
+      let fetches = 0;
+      ctx.callService = async () => { fetches += 1; return { deferred: true, uid: 7, sizeBytes: 21 * 1024 * 1024, estimateSec: 30 }; };
+      const pending = load('read_mail.js').createTools(ctx).execute('read_mail', { accountId: 'a', folder: 'INBOX', uid: 7 });
+      await vi.advanceTimersByTimeAsync(70000);
+      const v = JSON.parse(await pending);
+      expect(v.deferred).toBe(true);
+      expect(v.timedOut).toBe(true);
+      expect(v.message).toContain('转入');
+      expect(fetches).toBeGreaterThanOrEqual(20); // 轮询确实在跑（3s 间隔 × ≥20 次）
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('read_mail/list_folders：必填参数缺失 → 中文错误（不进 service）', async () => {

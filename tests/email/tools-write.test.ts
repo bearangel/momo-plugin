@@ -15,6 +15,13 @@ let dir: string;
 beforeEach(() => { dir = fs.mkdtempSync(path.join(os.tmpdir(), 'email-tools-')); });
 afterEach(() => { fs.rmSync(dir, { recursive: true, force: true }); });
 
+// 附件临时文件中转 mock（契约保真：service 真实行为=落盘后返回 tmpPath，不是内存 base64）
+function relayAtt(content: Buffer, extra: Record<string, unknown> = {}) {
+  const tmpPath = path.join(dir, `relay-${Date.now()}-${Math.random().toString(36).slice(2)}.bin`);
+  fs.writeFileSync(tmpPath, content);
+  return { tmpPath, filename: 'a.pdf', contentType: 'application/pdf', bytes: content.length, ...extra };
+}
+
 function makeCtx(service: Record<string, (p: unknown) => unknown> = {}) {
   const writes: Array<[string, string, string]> = [];
   const toolCtx = {
@@ -27,7 +34,7 @@ function makeCtx(service: Record<string, (p: unknown) => unknown> = {}) {
     getConfig: () => ({}), getDataDir: () => dir, logger: { info() {}, warn() {} },
     callService: async (method: string, params: unknown) => {
       if (method === 'attachments.get') {
-        return service.attachments_get ? service.attachments_get(params) : { filename: 'a.pdf', contentType: 'application/pdf', base64: Buffer.from('pdf-bytes').toString('base64') };
+        return service.attachments_get ? service.attachments_get(params) : relayAtt(Buffer.from('pdf-bytes'));
       }
       if (method === 'drafts.save') {
         return service.drafts_save ? service.drafts_save(params) : { id: 'draft_x', status: 'pending' };
@@ -42,21 +49,51 @@ function makeCtx(service: Record<string, (p: unknown) => unknown> = {}) {
 }
 
 describe('save_attachment', () => {
-  it('全链：拉附件 → 工作区落盘 → recordFileChange(create)', async () => {
+  it('全链：中转文件 → 工作区落盘 → recordFileChange(create) → 中转文件已删', async () => {
     const { pctx, toolCtx, writes } = makeCtx();
-    const out = await load('save_attachment.js').createTools(pctx).execute('save_attachment',
+    let relayPath = '';
+    const pctx2 = { ...pctx, callService: async (method: string, params: unknown) => {
+      const r = await pctx.callService(method, params);
+      relayPath = (r as { tmpPath: string }).tmpPath;
+      return r;
+    } };
+    const out = await load('save_attachment.js').createTools(pctx2).execute('save_attachment',
       { accountId: 'a', folder: 'INBOX', uid: 2, partId: '1.1', destPath: 'docs/a.pdf' }, toolCtx);
     const parsed = JSON.parse(out);
     expect(parsed.saved).toBe('docs/a.pdf');
     expect(fs.readFileSync(path.join(dir, 'docs/a.pdf')).toString()).toBe('pdf-bytes');
     expect(writes[0]).toEqual(['plugin:email/save_attachment', 'docs/a.pdf', 'create']);
+    expect(fs.existsSync(relayPath)).toBe(false); // 拷贝完成即删中转文件
   });
 
-  it('工具侧 10MB 双守门（service 放行也拒）', async () => {
-    const big = Buffer.alloc(10 * 1024 * 1024 + 1);
-    const { pctx, toolCtx } = makeCtx({ attachments_get: async () => ({ filename: 'big', contentType: 'x', base64: big.toString('base64') }) });
+  it('附件 >10MB 经中转正常保存（旧 10MB 双守门已随中转移除）', async () => {
+    const big = Buffer.alloc(10 * 1024 * 1024 + 1, 7);
+    const { pctx, toolCtx } = makeCtx({ attachments_get: async () => relayAtt(big, { filename: 'big' }) });
+    const out = await load('save_attachment.js').createTools(pctx).execute('save_attachment',
+      { accountId: 'a', folder: 'INBOX', uid: 1, partId: '1', destPath: 'big.bin' }, toolCtx);
+    expect(JSON.parse(out).bytes).toBe(big.length);
+    expect(fs.statSync(path.join(dir, 'big.bin')).size).toBe(big.length);
+  });
+
+  it('tmpPath 缺失 → 明确报错（服务契约不匹配不落盘）', async () => {
+    const { pctx, toolCtx } = makeCtx({ attachments_get: async () => ({ filename: 'a', contentType: 'x', bytes: 1 }) });
     await expect(load('save_attachment.js').createTools(pctx).execute('save_attachment',
-      { accountId: 'a', folder: 'INBOX', uid: 1, partId: '1', destPath: 'big' }, toolCtx)).rejects.toThrow('10MB');
+      { accountId: 'a', folder: 'INBOX', uid: 1, partId: '1', destPath: 'x' }, toolCtx)).rejects.toThrow('中转');
+  });
+
+  it('落盘失败也清理中转文件（finally 兜底）', async () => {
+    const { pctx } = makeCtx();
+    let relayPath = '';
+    const pctx2 = { ...pctx, callService: async (method: string, params: unknown) => {
+      const r = await pctx.callService(method, params);
+      relayPath = (r as { tmpPath: string }).tmpPath;
+      return r;
+    } };
+    // wsFs 校验抛错 → 拷贝前失败：工具应在拿到 tmpPath 后、门禁失败时也清理
+    await expect(load('save_attachment.js').createTools(pctx2).execute('save_attachment',
+      { accountId: 'a', folder: 'INBOX', uid: 1, partId: '1', destPath: 'x' },
+      { wsFs: { assertInWorkspace: () => { throw new Error('outside workspace'); } } })).rejects.toThrow('workspace');
+    expect(fs.existsSync(relayPath)).toBe(false);
   });
 
   it('缺 wsFs 注入 → 明确报错不降级', async () => {

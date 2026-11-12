@@ -10,8 +10,8 @@ description: 邮箱操作方法论——多账号经 plugin:email/* 工具集收
 - `plugin:email/list_accounts` 已配置账号（脱敏；带健康态）
 - `plugin:email/list_folders` 文件夹树（草稿/已发送归位探测）
 - `plugin:email/list_mails` 信封分页（filter：since/unreadOnly/from/subject；每页 ≤50）
-- `plugin:email/read_mail` 单封全文（>200KB 截断；>2MB 拒收）
-- `plugin:email/save_attachment` 附件存工作区（≤10MB；路径为工作区相对路径）
+- `plugin:email/read_mail` 单封内容（agent 视图：纯文本正文 >30K 字符截断；imageCount 图片计数；HTML 原文/内嵌图片不下发；>100MB 拒收）。>20MB 大邮件自动后台转入本地库并最多等 60s，超时返回「转入中」→ 稍后重试即秒读
+- `plugin:email/save_attachment` 附件存工作区（受整封邮件 ≤100MB 约束；路径为工作区相对路径）
 - `plugin:email/draft_mail` 起草（不发送；附件=工作区相对路径数组，总量 ≤25MB）
 - `plugin:email/send_draft` 发送已确认草稿（仅 draftId）
 
@@ -24,7 +24,7 @@ description: 邮箱操作方法论——多账号经 plugin:email/* 工具集收
 ## 起草规范
 
 - 称谓得体；回复引用关键原文（简摘，不整段粘贴）；落款默认跟随账号显示名
-- 附件给工作区相对路径；超限（单件 10MB / 总量 25MB）提前告知用户调整
+- 附件给工作区相对路径；超限（单件受整封 ≤100MB 约束 / 发送总量 25MB）提前告知用户调整
 
 ## 发送契约（硬规则）
 
@@ -41,5 +41,7 @@ description: 邮箱操作方法论——多账号经 plugin:email/* 工具集收
 | 认证失败（auth） | 提示用户到邮件面板检查授权码（可能过期/IMAP 未开启），勿重试轰炸 |
 | 文件夹不存在 | 先 `list_folders` 拿准确路径（中文文件夹名常见） |
 | 附件超限 | 明确报数值上限，建议用户改用小文件或网盘链接 |
-| 邮件 >2MB | 改用 save_attachment 按附件取 |
+| 邮件 >100MB | 整封读取被拒，让用户在邮箱客户端处理 |
+| 图多邮件 | read_mail 只给纯文本+imageCount；图片内容请让用户在邮件面板查看 |
+| 大邮件读取超时 | read_mail 已自动后台转入本地库（最长等 60s）；收到「转入中」→ 告知用户稍候片刻后再次调用 read_mail，从本地库秒读 |
 | 超时 | 提示网络状况，缓存列表仍可用（降级） |
