@@ -6,7 +6,8 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const { seal, open, generateMasterKey } = require('./crypto');
 
-const ARCHIVE_MAX_BYTES = 25 * 1024 * 1024;
+// 与 mailbox.READ_SOURCE_MAX 对齐（100MB）：25~100MB 邮件若不落盘，每次读信都会全量重拉 IMAP。
+const ARCHIVE_MAX_BYTES = 100 * 1024 * 1024;
 const KEY_NAME = 'archive:master-key';
 const ENC_VERSION = 1;
 

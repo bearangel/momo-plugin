@@ -50,10 +50,10 @@ describe('archive', () => {
     expect(buf.indexOf(Buffer.from('hello'))).toBe(-1);
   });
 
-  it('>25MB 不落盘标记 too_large；小文件正常落', async () => {
+  it('>100MB 不落盘标记 too_large（2026-11-11 与 READ_SOURCE_MAX 对齐）；小文件正常落', async () => {
     const arc = mk();
     await arc.setRoot(root);
-    const w = await arc.write('acc1', 'INBOX', 1, Buffer.alloc(25 * 1024 * 1024 + 1), Date.now());
+    const w = await arc.write('acc1', 'INBOX', 1, Buffer.alloc(100 * 1024 * 1024 + 1), Date.now());
     expect(w.stored).toBe(false);
     expect(w.reason).toBe('too_large');
     expect(store.getArchiveRow('acc1', 'INBOX', 1)!.state).toBe('too_large');

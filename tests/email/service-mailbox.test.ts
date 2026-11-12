@@ -21,6 +21,11 @@ const ACC = { id: 'acc1', email: 'me@qq.com', imap: { host: 'imap.qq.com', port:
 
 function makeImap(script: Record<string, unknown> = {}) {
   const calls: string[] = [];
+  const envelopes = () => (script.envelopes ?? [
+    { uid: 1, subject: 's1', from: 'g@h.i', to: 'me@qq.com', date: '2026-11-04T08:00:00Z', seen: false, hasAttachments: false, size: 800 },
+    { uid: 2, subject: 's2', from: 'd@e.f', to: 'me@qq.com', date: '2026-11-05T08:00:00Z', seen: true, hasAttachments: true, size: 900 },
+    { uid: 3, subject: 's3', from: 'a@b.c', to: 'me@qq.com', date: '2026-11-05T09:00:00Z', seen: false, hasAttachments: false, size: 1200 },
+  ]) as Array<{ uid: number; seen?: boolean; size?: number }>;
   const conn = {
     calls,
     lastCrit: null as unknown,
@@ -32,11 +37,13 @@ function makeImap(script: Record<string, unknown> = {}) {
     ]; },
     async search(_f: string, crit: unknown) { calls.push('search'); conn.lastCrit = crit; return script.uids ?? [3, 2, 1]; },
     // 假数据故意升序：真实 IMAP search 返回 uid 升序，列表层须自行降序（Important-4）。
-    async fetchEnvelopes() { calls.push('fetch'); return script.envelopes ?? [
-      { uid: 1, subject: 's1', from: 'g@h.i', to: 'me@qq.com', date: '2026-11-04T08:00:00Z', seen: false, hasAttachments: false, size: 800 },
-      { uid: 2, subject: 's2', from: 'd@e.f', to: 'me@qq.com', date: '2026-11-05T08:00:00Z', seen: true, hasAttachments: true, size: 900 },
-      { uid: 3, subject: 's3', from: 'a@b.c', to: 'me@qq.com', date: '2026-11-05T09:00:00Z', seen: false, hasAttachments: false, size: 1200 },
-    ]; },
+    async fetchEnvelopes() { calls.push('fetch'); return envelopes(); },
+    // 单封信封（在线读信/取附件路径专用）：未命中返回 null，仿真 adapter 契约
+    async fetchEnvelope(_f: string, uid: number) { calls.push('fetchOne'); return envelopes().find((e) => Number(e.uid) === Number(uid)) ?? null; },
+    async markSeen(_f: string, uid: number) {
+      calls.push('markSeen:' + uid);
+      if (script.markSeenFails) throw new Error(String(script.markSeenFails));
+    },
     async fetchSource(folder: string, uid: number) { calls.push('source'); conn.lastSource = { folder, uid }; return Buffer.from(`SRC:${folder}:${uid}`); },
     async status() { calls.push('status'); return { unseen: 2 }; },
     async append() { calls.push('append'); return 42; },
@@ -62,6 +69,21 @@ function makeMailbox(conn: ReturnType<typeof makeImap>, over: Record<string, unk
     opTimeoutMs: 60,
     ...over,
   } as never);
+}
+
+function fakeArchive(files: Map<string, Buffer>) {
+  const written: Array<{ accountId: string; folder: string; uid: number; raw: Buffer }> = [];
+  return {
+    written,
+    async read(accountId: string, folder: string, uid: number) {
+      const raw = files.get(`${accountId}|${folder}|${uid}`);
+      return raw ? { raw } : null;
+    },
+    async write(accountId: string, folder: string, uid: number, raw: Buffer) {
+      written.push({ accountId, folder, uid, raw });
+      return { stored: true };
+    },
+  };
 }
 
 describe('mailbox', () => {
@@ -341,13 +363,156 @@ describe('mailbox', () => {
     expect(conn.lastCrit).toMatchObject({ since: '2026-11-05', unseen: true, from: 'a@b.c', subject: '报价' });
   });
 
-  it('read：>2MB 拒收；text >200KB 截断标注', async () => {
+  it('read：3MB 放行（2026-11-11 100MB 上限）；>100MB 拒收；text >200KB 截断标注', async () => {
     const conn = makeImap({ envelopes: [{ uid: 1, subject: 's', from: 'a@b.c', to: 'm', date: '2026-11-05T00:00:00Z', seen: false, hasAttachments: true, size: 3 * 1024 * 1024 }] });
-    await expect(makeMailbox(conn).read('acc1', 'INBOX', 1)).rejects.toThrow('2MB');
+    const r = await makeMailbox(conn).read('acc1', 'INBOX', 1);
+    expect(r.uid).toBe(1);
+    const big = makeImap({ envelopes: [{ uid: 1, subject: 's', from: 'a@b.c', to: 'm', date: '2026-11-05T00:00:00Z', seen: false, hasAttachments: true, size: 101 * 1024 * 1024 }] });
+    await expect(makeMailbox(big).read('acc1', 'INBOX', 1)).rejects.toThrow('100MB');
     const mb2 = makeMailbox(makeImap(), { parseMail: async () => ({ text: 'x'.repeat(250 * 1024), html: null, attachments: [] }) });
-    const r = await mb2.read('acc1', 'INBOX', 3);
-    expect(r.text.length).toBeLessThanOrEqual(200 * 1024 + 40);
-    expect(r.truncated).toBe(true);
+    const r2 = await mb2.read('acc1', 'INBOX', 3);
+    expect(r2.text.length).toBeLessThanOrEqual(200 * 1024 + 40);
+    expect(r2.truncated).toBe(true);
+  });
+
+  it('read：视图携带 textChars/htmlChars/imageCount（agent 视图数据源，截断前统计）', async () => {
+    const mb = makeMailbox(makeImap(), { parseMail: async () => ({ text: 't'.repeat(100), html: '<p>x</p><img src="a"><img src="b">', attachments: [] }) });
+    const r = await mb.read('acc1', 'INBOX', 3);
+    expect(r.imageCount).toBe(2);
+    expect(r.htmlChars).toBeGreaterThan(0);
+    expect(r.textChars).toBe(100);
+  });
+
+  it('read：在线路径走 fetchOne 单封（不再 search 全量 + fetch 全量信封）', async () => {
+    const conn = makeImap();
+    await makeMailbox(conn).read('acc1', 'INBOX', 3);
+    expect(conn.calls).toContain('fetchOne');
+    expect(conn.calls).not.toContain('search');
+    expect(conn.calls).not.toContain('fetch');
+  });
+
+  it('read：fetchOne 未命中 → 邮件不存在', async () => {
+    const conn = makeImap({ envelopes: [] });
+    await expect(makeMailbox(conn).read('acc1', 'INBOX', 99)).rejects.toThrow('邮件不存在');
+  });
+
+  it('read：接受 patient 预算参数（面板大邮件慢链路 25s）', async () => {
+    const mb = makeMailbox(makeImap());
+    await expect(mb.read('acc1', 'INBOX', 3, { patient: true })).resolves.toMatchObject({ uid: 3 });
+  });
+
+  it('read：在线读信成功 → best-effort markSeen + 信封缓存 seen 回写', async () => {
+    const conn = makeImap();
+    const mb = makeMailbox(conn);
+    await mb.envelopes('acc1', 'INBOX', { force: true });
+    expect(lastCache.read('acc1', 'INBOX')!.items.find((e) => e.uid === 3)!.seen).toBe(false);
+    await mb.read('acc1', 'INBOX', 3);
+    await new Promise((r) => setTimeout(r, 30));
+    expect(conn.calls).toContain('markSeen:3');
+    expect(lastCache.read('acc1', 'INBOX')!.items.find((e) => e.uid === 3)!.seen).toBe(true);
+  });
+
+  it('read：markSeen 失败（离线/连接断）→ 读信不受影响、缓存不回写', async () => {
+    const conn = makeImap({ markSeenFails: 'Connection closed' });
+    const mb = makeMailbox(conn);
+    await mb.envelopes('acc1', 'INBOX', { force: true });
+    const r = await mb.read('acc1', 'INBOX', 3);
+    expect(r.uid).toBe(3);
+    await new Promise((res) => setTimeout(res, 30));
+    expect(lastCache.read('acc1', 'INBOX')!.items.find((e) => e.uid === 3)!.seen).toBe(false);
+  });
+
+  it('read：已读邮件（seen=true）不重复 markSeen', async () => {
+    const conn = makeImap();
+    const mb = makeMailbox(conn);
+    await mb.read('acc1', 'INBOX', 2); // uid 2 默认 seen: true
+    await new Promise((r) => setTimeout(r, 30));
+    expect(conn.calls).not.toContain('markSeen:2');
+  });
+
+  describe('大邮件异步预热 + deferred（2026-11-11 立项 B）', () => {
+    const BIG = { uid: 1, subject: 'big', from: 'a@b.c', to: 'm', date: '2026-11-05T00:00:00Z', seen: false, hasAttachments: true, size: 21 * 1024 * 1024 };
+
+    it('warmup opt-in + >20MB 未归档 → 立即 deferred（形状），预热后台落归档', async () => {
+      const conn = makeImap({ envelopes: [BIG] });
+      const arc = fakeArchive(new Map());
+      const mb = makeMailbox(conn, { archive: arc });
+      const t0 = Date.now();
+      const r = await mb.read('acc1', 'INBOX', 1, { warmup: true });
+      expect(Date.now() - t0).toBeLessThan(1000); // 秒回（不等拉源）
+      expect(r.deferred).toBe(true);
+      expect(r.sizeBytes).toBe(21 * 1024 * 1024);
+      expect(r.estimateSec).toBeGreaterThanOrEqual(5);
+      await new Promise((res) => setTimeout(res, 30)); // 预热（fire-and-forget）落定
+      expect(arc.written).toHaveLength(1);
+      expect(arc.written[0]!.uid).toBe(1);
+      // 预热完成 → 再读命中归档快路径（不再 deferred）
+      const mb2 = makeMailbox(makeImap(), { archive: arc });
+      const view = await mb2.read('acc1', 'INBOX', 1, { warmup: true });
+      expect(view.deferred).toBeUndefined();
+      expect(view.subject).toBe('s1'); // env 取信封缓存/自解析
+    });
+
+    it('未传 warmup（面板语义）+ >20MB → 照旧同步读（deferred 是 opt-in）', async () => {
+      const conn = makeImap({ envelopes: [BIG] });
+      const r = await makeMailbox(conn).read('acc1', 'INBOX', 1);
+      expect(r.deferred).toBeUndefined();
+      expect(conn.calls).toContain('source');
+    });
+
+    it('≤20MB + warmup → 不 deferred，同步读', async () => {
+      const conn = makeImap({ envelopes: [{ ...BIG, size: 20 * 1024 * 1024 }] });
+      const r = await makeMailbox(conn).read('acc1', 'INBOX', 1, { warmup: true });
+      expect(r.deferred).toBeUndefined();
+    });
+
+    it('归档命中优先于 deferred（已归档大邮件直接快路径）', async () => {
+      const files = new Map([['acc1|INBOX|1', Buffer.from('From: a@b\r\nSubject: s\r\n\r\nbody')]]);
+      const arc = fakeArchive(files);
+      const r = await makeMailbox(makeImap(), { archive: arc, parseMail: simpleParserOf('s') }).read('acc1', 'INBOX', 1, { warmup: true });
+      expect(r.deferred).toBeUndefined();
+      expect(String(r.text)).toContain('body');
+    });
+
+    it('预热去重：fetchSource 挂起期间连续两次 deferred 读 → 只触发一次拉源', async () => {
+      let release: (() => void) | null = null;
+      const conn = makeImap({ envelopes: [BIG] });
+      let sourceCalls = 0;
+      (conn as unknown as { fetchSource: unknown }).fetchSource = () => {
+        sourceCalls += 1;
+        return new Promise((res) => { release = () => res(Buffer.from('SRC')); });
+      };
+      const arc = fakeArchive(new Map());
+      const mb = makeMailbox(conn, { archive: arc });
+      const r1 = await mb.read('acc1', 'INBOX', 1, { warmup: true });
+      const r2 = await mb.read('acc1', 'INBOX', 1, { warmup: true });
+      expect(r1.deferred).toBe(true);
+      expect(r2.deferred).toBe(true); // 未收敛前持续 deferred（且不因误存 readCache 而变形）
+      await new Promise((res) => setTimeout(res, 10));
+      expect(sourceCalls).toBe(1); // in-flight 去重
+      release!();
+      await new Promise((res) => setTimeout(res, 30));
+      expect(arc.written).toHaveLength(1);
+    });
+
+    it('预热失败退避：失败后紧接的 deferred 读不重复触发拉源', async () => {
+      const conn = makeImap({ envelopes: [BIG] });
+      let sourceCalls = 0;
+      (conn as unknown as { fetchSource: unknown }).fetchSource = async () => {
+        sourceCalls += 1;
+        throw new Error('boom');
+      };
+      const mb = makeMailbox(conn, { archive: fakeArchive(new Map()) });
+      expect((await mb.read('acc1', 'INBOX', 1, { warmup: true })).deferred).toBe(true);
+      await new Promise((res) => setTimeout(res, 10));
+      expect((await mb.read('acc1', 'INBOX', 1, { warmup: true })).deferred).toBe(true);
+      await new Promise((res) => setTimeout(res, 10));
+      expect(sourceCalls).toBe(1); // 退避窗口内不重触发
+    });
+
+    function simpleParserOf(subject: string) {
+      return async (raw: Buffer) => ({ subject, from: { text: 'a@b' }, to: { text: 'm' }, text: raw.toString('utf8').split('\r\n\r\n')[1] ?? '', html: null, date: new Date('2026-11-05T09:00:00Z'), attachments: [] });
+    }
   });
 
   it('read：mailparser html=false → 归一为 null（纯文本不误判 HTML）', async () => {
@@ -390,12 +555,17 @@ describe('mailbox', () => {
     expect(conn.calls.filter((c) => c === 'source')).toHaveLength(1);
   });
 
-  it('attachment：≤10MB 守门 + partId 命中返回 base64', async () => {
+  it('attachment：载体 >100MB 拒收；命中返回 content Buffer（不再 base64/10MB 守门）', async () => {
     const conn = makeImap({ envelopes: [{ uid: 2, subject: 's', from: 'a@b.c', to: 'm', date: '2026-11-05T00:00:00Z', seen: true, hasAttachments: true, size: 11 * 1024 * 1024 }] });
-    await expect(makeMailbox(conn).attachment('acc1', 'INBOX', 2, '1.1')).rejects.toThrow('10MB');
+    const a11 = await makeMailbox(conn).attachment('acc1', 'INBOX', 2, '1.1');
+    expect(a11.filename).toBe('a.pdf'); // 11MB 载体现在放行（旧 10MB 守门已随临时文件中转移除）
+    const big = makeImap({ envelopes: [{ uid: 2, subject: 's', from: 'a@b.c', to: 'm', date: '2026-11-05T00:00:00Z', seen: true, hasAttachments: true, size: 101 * 1024 * 1024 }] });
+    await expect(makeMailbox(big).attachment('acc1', 'INBOX', 2, '1.1')).rejects.toThrow('100MB');
     const a = await makeMailbox(makeImap()).attachment('acc1', 'INBOX', 2, '1.1');
     expect(a.filename).toBe('a.pdf');
-    expect(a.base64).toBe(Buffer.from('pdf').toString('base64'));
+    expect(Buffer.isBuffer(a.content)).toBe(true);
+    expect(a.content.toString()).toBe('pdf');
+    expect(a).not.toHaveProperty('base64');
   });
 
   it('单操作超时 → 中文错误', async () => {
@@ -437,22 +607,8 @@ describe('mailbox 本地归档优先（2026-11-05 归档 spec §7）', () => {
         attachments: [{ partId: '1.1', filename: 'a.pdf', contentType: 'application/pdf', content: Buffer.from('pdf') }] };
     };
   }
-  function fakeArchive(files: Map<string, Buffer>) {
-    const written: Array<{ accountId: string; folder: string; uid: number; raw: Buffer }> = [];
-    return {
-      written,
-      async read(accountId: string, folder: string, uid: number) {
-        const raw = files.get(`${accountId}|${folder}|${uid}`);
-        return raw ? { raw } : null;
-      },
-      async write(accountId: string, folder: string, uid: number, raw: Buffer) {
-        written.push({ accountId, folder, uid, raw });
-        return { stored: true };
-      },
-    };
-  }
 
-  it('归档命中 → 不触 IMAP；subject/from 自解析兜底', async () => {
+  it('归档命中 → 不拉源；subject/from 自解析兜底（无信封缓存时）', async () => {
     const files = new Map([['acc1|INBOX|1', Buffer.from('From: local@x.y\r\nSubject: 本地信\r\n\r\n本地正文')]]);
     const arc = fakeArchive(files);
     const conn = makeImap();
@@ -460,7 +616,28 @@ describe('mailbox 本地归档优先（2026-11-05 归档 spec §7）', () => {
     const view = await mb.read('acc1', 'INBOX', 1);
     expect(view.subject).toBe('本地信');
     expect(String(view.text)).toContain('本地正文');
-    expect(conn.calls).toHaveLength(0);
+    expect(conn.calls).not.toContain('source'); // 归档命中不重新拉源（markSeen 触碰除外）
+  });
+
+  it('归档命中 → 读信 best-effort markSeen + 信封缓存 seen 回写（有缓存时 env 取缓存）', async () => {
+    const files = new Map([['acc1|INBOX|1', Buffer.from('From: local@x.y\r\nSubject: 本地信\r\n\r\n本地正文')]]);
+    const arc = fakeArchive(files);
+    const conn = makeImap();
+    const mb = makeMailbox(conn, { archive: arc, parseMail: simpleParser() });
+    await mb.envelopes('acc1', 'INBOX', { force: true }); // 预置信封缓存（uid1 seen=false，subject=s1）
+    const view = await mb.read('acc1', 'INBOX', 1);
+    expect(view.subject).toBe('s1'); // env 缓存优先（缓存里有就用缓存的信封）
+    expect(conn.calls).not.toContain('source');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(conn.calls).toContain('markSeen:1'); // 标记已读触服务器（PEEK 语义兜底）
+    expect(lastCache.read('acc1', 'INBOX')!.items.find((e) => e.uid === 1)!.seen).toBe(true);
+  });
+
+  it('归档 raw >100MB → 拒收（与在线路径同限）', async () => {
+    const files = new Map([['acc1|INBOX|1', Buffer.alloc(101 * 1024 * 1024)]]);
+    const arc = fakeArchive(files);
+    const mb = makeMailbox(makeImap(), { archive: arc, parseMail: simpleParser() });
+    await expect(mb.read('acc1', 'INBOX', 1)).rejects.toThrow('100MB');
   });
 
   it('归档缺失 → IMAP 回退成功并异步回填原文', async () => {

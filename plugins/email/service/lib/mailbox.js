@@ -5,9 +5,15 @@
 const { decodeModifiedUtf7 } = require('./utf7');
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
-const READ_SOURCE_MAX = 2 * 1024 * 1024;   // read_mail 全源上限
-const TEXT_TRUNCATE = 200 * 1024;           // 正文截断
-const ATTACH_MAX = 10 * 1024 * 1024;        // 附件 RPC 上限
+// 全源上限（读信与附件载体共用）：2026-11-11 由 2MB 提至 100MB，对齐公司内网邮件规格。
+// 附件不再单设上限——附件不可能大于整封邮件，载体上限天然约束。
+const READ_SOURCE_MAX = 100 * 1024 * 1024;
+// 面板 patient 读信预算：大邮件慢链路需要；agent 路径仍走 opTimeoutMs（8s，先于宿主 callService 桥 10s 落定）。
+const READ_PATIENT_MS = 25 * 1000;
+const TEXT_TRUNCATE = 200 * 1024;           // 正文截断（面板视图；agent 视图另有 30K 预算，见 tools/read_mail.js）
+const WARMUP_THRESHOLD = 20 * 1024 * 1024;  // 超此大小的未归档邮件，agent 读信走「后台预热 + deferred」而非同步拉取
+const WARMUP_FETCH_TIMEOUT_MS = 10 * 60 * 1000; // 预热在 service 内部执行、不过桥，可给足慢链路预算
+const WARMUP_BACKOFF_MS = 2 * 60 * 1000;    // 预热失败后的重触发退避（防工具轮询风暴打爆 IMAP 连接锁）
 const IDLE_MS = 10 * 60 * 1000;             // 连接空闲回收
 const READ_CACHE_MAX = 50;                  // 正文内存 LRU 容量
 const FOLDERS_TTL_MS = 60 * 1000;           // 文件夹树缓存（切账号体感）
@@ -52,6 +58,7 @@ function findFolders(raw, specialUse, names) {
 function createMailbox({ accountStore, cache, imapConnect, parseMail, store, archive, opTimeoutMs = 30000 }) {
   const conns = new Map(); // accountId → { conn, lastUsed }
   const readCache = new Map(); // `${accountId}|${folder}|${uid}` → read 结果（Map 迭代序即 LRU 序）
+  const warmups = new Map(); // 同 key → { promise, at }：运行中去重；失败留 at 作退避锚点；成功即删（归档接管收敛）
 
   async function dropConn(accountId) {
     const hit = conns.get(accountId);
@@ -233,6 +240,10 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, arc
     return {
       uid, subject: env.subject, from: env.from, to: env.to, date: env.date, seen: env.seen,
       text: textTruncated ? text.slice(0, TEXT_TRUNCATE) + '\n…（已截断，全文 200KB 上限）' : text,
+      // textChars/htmlChars/imageCount：截断前的全文统计，agent 视图据此告知「图多/正文长」而不下发原文
+      textChars: text.length,
+      htmlChars: htmlRaw ? htmlRaw.length : 0,
+      imageCount: htmlRaw ? (htmlRaw.match(/<img\b/gi) || []).length : 0,
       html: htmlTruncated ? htmlRaw.slice(0, TEXT_TRUNCATE) + '\n…（已截断，全文 200KB 上限）' : htmlRaw,
       truncated: textTruncated || htmlTruncated,
       attachments: (parsed.attachments || []).map((a) => ({
@@ -251,7 +262,41 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, arc
     seen: false,
   });
 
-  async function readImpl(accountId, folder, uid) {
+  // 读信成功即标已读（best-effort，不阻断读信返回）：
+  // ImapFlow fetch 全走 BODY.PEEK（刻意不置 \Seen），若无此步服务器与本地信封缓存将永远「未读」。
+  // 离线归档读/标记失败 → 静默放弃（返回 false），下次读信或刷新自然重试。
+  function markSeenAndSync(accountId, folder, uid, alreadySeen) {
+    if (alreadySeen) return Promise.resolve(false);
+    return withConn(accountId, (conn) => withTimeout('标记已读', conn.markSeen(folder, uid)))
+      .then(() => {
+        const cached = cache.read(accountId, folder);
+        if (cached && cached.items.some((e) => Number(e.uid) === uid)) {
+          cache.write(accountId, folder, cached.items.map((e) => (Number(e.uid) === uid ? { ...e, seen: true } : e)));
+        }
+        return true;
+      })
+      .catch(() => false); // best-effort：离线归档读/标记失败不阻断
+  }
+
+  // 后台预热：拉源直落归档（不解析——解析留给收敛后的归档快路径读）。
+  // 不过桥、不受单次调用预算约束（自有 10min 预算）；成功即删条目（归档命中接管收敛），
+  // 失败保留条目至退避窗口过期——轮询方每 3s 重试读信时不会重复触发新预热打爆连接锁。
+  function triggerWarmup(accountId, folder, uid) {
+    const key = `${accountId}|${folder}|${uid}`;
+    const hit = warmups.get(key);
+    if (hit && Date.now() - hit.at < WARMUP_BACKOFF_MS) return hit.promise;
+    const entry = { promise: null, at: Date.now() };
+    entry.promise = withConn(accountId, async (conn) => {
+      const source = await withTimeout('预热', conn.fetchSource(folder, uid), WARMUP_FETCH_TIMEOUT_MS);
+      if (archive) await archive.write(accountId, folder, uid, source, 0);
+    })
+      .then(() => { warmups.delete(key); return 'done'; })
+      .catch(() => 'failed');
+    warmups.set(key, entry);
+    return entry.promise;
+  }
+
+  async function readImpl(accountId, folder, uid, opts = {}) {
     const key = `${accountId}|${folder}|${uid}`;
     const cached = readCacheGet(key);
     if (cached) return cached;
@@ -259,52 +304,58 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, arc
       const hit = await archive.read(accountId, folder, uid);
       if (hit) {
         if (hit.raw.length > READ_SOURCE_MAX) {
-          throw new Error(`邮件体积 ${(hit.raw.length / 1048576).toFixed(1)}MB 超过 2MB 读取上限——附件请用 save_attachment`);
+          throw new Error(`邮件体积 ${(hit.raw.length / 1048576).toFixed(1)}MB 超过 100MB 读取上限`);
         }
         const parsed = await parseMail(hit.raw);
         const env = cache.read(accountId, folder)?.items.find((e) => Number(e.uid) === uid) ?? envOfParsed(uid, parsed);
         const view = buildReadView(uid, env, parsed);
+        void markSeenAndSync(accountId, folder, uid, env.seen === true).catch(() => undefined);
         readCacheSet(key, view);
         return view;
       }
     }
-    const { env, source } = await withConn(accountId, async (conn) => {
-      const uids = await withTimeout('search', conn.search(folder, {}));
-      const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
-      const hit = envs.find((e) => e.uid === uid);
-      if (!hit) throw new Error(`邮件不存在（folder=${folder} uid=${uid}）`);
-      if ((hit.size || 0) > READ_SOURCE_MAX) {
-        throw new Error(`邮件体积 ${(hit.size / 1048576).toFixed(1)}MB 超过 2MB 读取上限——附件请用 save_attachment`);
-      }
-      return { env: hit, source: await withTimeout('source', conn.fetchSource(folder, uid)) };
-    });
+    // 在线路径只拉目标单封（fetchOne），不再 search 全量 uid + fetch 全量信封——万级邮箱下每次读信全量拉信封不可承受。
+    const env = await withConn(accountId, (conn) => withTimeout('信封', conn.fetchEnvelope(folder, uid)));
+    if (!env) throw new Error(`邮件不存在（folder=${folder} uid=${uid}）`);
+    if ((env.size || 0) > READ_SOURCE_MAX) {
+      throw new Error(`邮件体积 ${(env.size / 1048576).toFixed(1)}MB 超过 100MB 读取上限`);
+    }
+    // 大邮件异步预热（agent 读信 opt-in）：立即返回 deferred 让桥秒回，后台拉源落归档；
+    // 调用方轮询重读 → 命中归档快路径收敛。estimateSec 按 ~10Mbps 慢链路保守估。
+    if (opts.warmup === true && (env.size || 0) > WARMUP_THRESHOLD) {
+      void triggerWarmup(accountId, folder, uid);
+      return {
+        deferred: true, uid,
+        sizeBytes: env.size || 0,
+        estimateSec: Math.max(5, Math.ceil((env.size || 0) / (1.2 * 1024 * 1024))),
+      };
+    }
+    const source = await withConn(accountId, (conn) => withTimeout('source', conn.fetchSource(folder, uid)));
     const parsed = await parseMail(source);
     const view = buildReadView(uid, env, parsed);
     if (archive) {
       void archive.write(accountId, folder, uid, source, Date.parse(env.date) || 0).catch(() => undefined);
     }
+    void markSeenAndSync(accountId, folder, uid, env.seen === true).catch(() => undefined);
     readCacheSet(key, view);
     return view;
   }
 
   async function attachmentImpl(accountId, folder, uid, partId) {
+    const findAtt = (parsed) => (parsed.attachments || []).find((a) => a.partId === partId);
     if (archive) {
       const hit = await archive.read(accountId, folder, uid);
-      if (hit && hit.raw.length <= ATTACH_MAX) {
+      if (hit && hit.raw.length <= READ_SOURCE_MAX) {
         const parsed = await parseMail(hit.raw);
-        const att = (parsed.attachments || []).find((a) => a.partId === partId);
-        if (att) {
-          if (att.content.length > ATTACH_MAX) throw new Error(`附件超过 10MB 上限（${att.filename}）`);
-          return { filename: att.filename, contentType: att.contentType, base64: att.content.toString('base64') };
-        }
+        const att = findAtt(parsed);
+        // 返回 content Buffer（调用方 service 侧经临时文件中转交付，不再 base64 过 RPC 桥）
+        if (att) return { filename: att.filename, contentType: att.contentType, content: att.content };
       }
     }
     const source = await withConn(accountId, async (conn) => {
-      const uids = await withTimeout('search', conn.search(folder, {}));
-      const envs = await withTimeout('fetch', conn.fetchEnvelopes(folder, uids));
-      const env = envs.find((e) => e.uid === uid);
-      if (env && (env.size || 0) > ATTACH_MAX) {
-        throw new Error(`附件载体超过 10MB 上限（邮件 ${(env.size / 1048576).toFixed(1)}MB）`);
+      const env = await withTimeout('信封', conn.fetchEnvelope(folder, uid));
+      if (env && (env.size || 0) > READ_SOURCE_MAX) {
+        throw new Error(`附件载体超过 100MB 上限（邮件 ${(env.size / 1048576).toFixed(1)}MB）`);
       }
       return withTimeout('source', conn.fetchSource(folder, uid));
     });
@@ -312,10 +363,9 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, arc
       void archive.write(accountId, folder, uid, source, 0).catch(() => undefined);
     }
     const parsed = await parseMail(source);
-    const att = (parsed.attachments || []).find((a) => a.partId === partId);
+    const att = findAtt(parsed);
     if (!att) throw new Error(`附件不存在: partId=${partId}`);
-    if (att.content.length > ATTACH_MAX) throw new Error(`附件超过 10MB 上限（${att.filename}）`);
-    return { filename: att.filename, contentType: att.contentType, base64: att.content.toString('base64') };
+    return { filename: att.filename, contentType: att.contentType, content: att.content };
   }
 
   return {
@@ -347,7 +397,10 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, arc
     },
     // 单次 service 调用总预算：整条链（选箱/search/fetch/parse）受 opTimeoutMs 约束，内部单操作超时保留。
     envelopes: (accountId, folder, opts) => withTimeout('列表', envelopesImpl(accountId, folder, opts)),
-    read: (accountId, folder, uid) => withTimeout('读信', readImpl(accountId, folder, uid)),
+    // opts.patient：面板大邮件慢链路用 25s 预算；默认 8s（agent 路径先于宿主桥 10s 落定）
+    // opts.warmup：agent 读信专用——超阈值未归档邮件返回 deferred 而非同步拉取
+    read: (accountId, folder, uid, opts) => withTimeout('读信', readImpl(accountId, folder, uid, opts),
+      opts && opts.patient ? READ_PATIENT_MS : opTimeoutMs),
     attachment: (accountId, folder, uid, partId) => withTimeout('取附件', attachmentImpl(accountId, folder, uid, partId)),
     async append(accountId, folder, raw) {
       return withConn(accountId, (conn) => withTimeout('append', conn.append(folder, raw)));
@@ -368,4 +421,4 @@ function createMailbox({ accountStore, cache, imapConnect, parseMail, store, arc
   };
 }
 
-module.exports = { createMailbox, findFolders, CACHE_TTL_MS, FOLDERS_TTL_MS };
+module.exports = { createMailbox, findFolders, CACHE_TTL_MS, FOLDERS_TTL_MS, READ_SOURCE_MAX, READ_PATIENT_MS, WARMUP_THRESHOLD };
