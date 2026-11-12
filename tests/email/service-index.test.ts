@@ -18,6 +18,7 @@ class FakeImapFlow extends EventEmitter {
   selectedFolder: string | null = null;
   openedFolders: string[] = [];
   lastSearch: unknown = null;
+  flagsAdded: Array<{ folder: string; uid: string; flags: string[] }> = [];
   namespace: { prefix: string; delimiter: string } = { prefix: '', delimiter: '/' };
   constructor(opts: unknown) { super(); this.opts = opts; }
   async connect() {}
@@ -37,13 +38,29 @@ class FakeImapFlow extends EventEmitter {
     this.lastSearch = crit;
     return [1];
   }
-  async *fetch() {
+  lastFetchQuery: unknown = null;
+  fetchOneQueries: Array<{ flags?: boolean; source?: boolean }> = [];
+  flagsAddReturn: boolean | false = true;
+  async *fetch(_uids: unknown, query?: unknown) {
     if (!this.selectedFolder) throw new Error('No mailbox selected');
+    this.lastFetchQuery = query;
     yield { uid: 1, envelope: { subject: 's', from: [{ address: 'a@b.c' }], to: [{ address: 'm@n.o' }], date: new Date('2026-11-05T00:00:00Z') }, flags: new Set(), bodyStructure: {}, size: 100 };
   }
-  async fetchOne() {
+  async fetchOne(_seq: unknown, query?: { source?: boolean }) {
     if (!this.selectedFolder) throw new Error('No mailbox selected');
-    return { source: Buffer.from('MIME') };
+    this.fetchOneQueries.push(query ?? {});
+    // query.source → 拉源；否则按单封信封查询返回全字段（仿真真实 ImapFlow fetchOne 两种用法）
+    if (query && query.source) return { source: Buffer.from('MIME'), uid: 1 };
+    return {
+      uid: 1, source: Buffer.from('MIME'),
+      envelope: { subject: 's', from: [{ address: 'a@b.c' }], to: [{ address: 'm@n.o' }], date: new Date('2026-11-05T00:00:00Z') },
+      flags: new Set(), bodyStructure: {}, size: 100,
+    };
+  }
+  async messageFlagsAdd(uid: string, flags: string[]) {
+    if (!this.selectedFolder) throw new Error('No mailbox selected');
+    this.flagsAdded.push({ folder: this.selectedFolder, uid, flags });
+    return this.flagsAddReturn;
   }
   async status() { return { unseen: 2 }; }
   async append() { return { uid: 7 }; }
@@ -151,6 +168,124 @@ describe('service index', () => {
     const accId = (await svc.handle('accounts.list', {}))[0].id;
     await svc.handle('mails.list', { accountId: accId, folder: 'INBOX' });
     expect(fake!.openedFolders).toContain('INBOX');
+  });
+
+  it('mails.get 读信成功 → messageFlagsAdd(\\Seen)（PEEK 不置已读的兜底回归锁）', async () => {
+    let fake: FakeImapFlow | null = null;
+    class Spy extends FakeImapFlow { constructor(o: unknown) { super(o); fake = this; } }
+    const svc = buildService(makeDeps({ imapflow: Spy }));
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    const r = await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 });
+    expect(r).toMatchObject({ uid: 1 });
+    await new Promise((res) => setTimeout(res, 30));
+    expect(fake!.flagsAdded).toContainEqual({ folder: 'INBOX', uid: '1', flags: ['\\Seen'] });
+  });
+
+  it('mails.get 透传 patient（面板大邮件慢链路预算）', async () => {
+    const svc = buildService(makeDeps());
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    const r = await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1, patient: true });
+    expect(r).toMatchObject({ uid: 1 });
+  });
+
+  it('fetch 信封请求必须含 FLAGS 字段（seen 解析契约——2026-11-11 e2e QQ 实测根因回归锁）', async () => {
+    let fake: FakeImapFlow | null = null;
+    class Spy extends FakeImapFlow { constructor(o: unknown) { super(o); fake = this; } }
+    const svc = buildService(makeDeps({ imapflow: Spy }));
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    await svc.handle('mails.refresh', { accountId: acc.id, folder: 'INBOX', page: 1, pageSize: 20 });
+    expect((fake!.lastFetchQuery as { flags?: boolean }).flags).toBe(true);
+    await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 });
+    expect(fake!.fetchOneQueries.some((q) => q.flags === true)).toBe(true); // 信封查询（非 source 查询）须带 flags
+    await svc.stop();
+  });
+
+  it('messageFlagsAdd 静默 false → 不误标本地缓存 seen（adapter 判 false 抛错回归锁）', async () => {
+    let fake: FakeImapFlow | null = null;
+    class FalseStore extends FakeImapFlow {
+      constructor(o: unknown) { super(o); fake = this; this.flagsAddReturn = false as unknown as boolean; }
+    }
+    const svc = buildService(makeDeps({ imapflow: FalseStore }));
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    await svc.handle('mails.refresh', { accountId: acc.id, folder: 'INBOX', page: 1, pageSize: 20 });
+    await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(fake!.flagsAdded.length).toBeGreaterThan(0); // STORE 尝试发生了
+    const peek = await svc.handle('mails.peek', { accountId: acc.id, folder: 'INBOX', page: 1, pageSize: 20 }) as { items: Array<{ uid: number; seen: boolean }> };
+    expect(peek.items.find((e) => e.uid === 1)!.seen).toBe(false); // 但静默失败不得回写 seen=true
+    await svc.stop();
+  });
+
+  it('messageFlagsAdd true → markSeen 后本地缓存 seen 回写为 true（全链正例）', async () => {
+    const svc = buildService(makeDeps());
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    await svc.handle('mails.refresh', { accountId: acc.id, folder: 'INBOX', page: 1, pageSize: 20 });
+    await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 });
+    await new Promise((r) => setTimeout(r, 30));
+    const peek = await svc.handle('mails.peek', { accountId: acc.id, folder: 'INBOX', page: 1, pageSize: 20 }) as { items: Array<{ uid: number; seen: boolean }> };
+    expect(peek.items.find((e) => e.uid === 1)!.seen).toBe(true);
+    await svc.stop();
+  });
+
+  it('mails.get 透传 warmup：>20MB 未归档 → 路由级返回 deferred 形状；不传 warmup 则同步', async () => {
+    class BigMail extends FakeImapFlow {
+      override async fetchOne(_seq: unknown, query?: { source?: boolean }) {
+        if (!this.selectedFolder) throw new Error('No mailbox selected');
+        if (query && query.source) return { source: Buffer.from('MIME'), uid: 1 };
+        return {
+          uid: 1, source: Buffer.from('MIME'),
+          envelope: { subject: 'big', from: [{ address: 'a@b.c' }], to: [{ address: 'm@n.o' }], date: new Date('2026-11-05T00:00:00Z') },
+          flags: new Set(), bodyStructure: {}, size: 21 * 1024 * 1024,
+        };
+      }
+    }
+    const svc = buildService(makeDeps({ imapflow: BigMail }));
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    const d = await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1, warmup: true }) as { deferred?: boolean; sizeBytes?: number };
+    expect(d.deferred).toBe(true);
+    expect(d.sizeBytes).toBe(21 * 1024 * 1024);
+    const sync = await svc.handle('mails.get', { accountId: acc.id, folder: 'INBOX', uid: 1 }) as { deferred?: boolean };
+    expect(sync.deferred).toBeUndefined(); // 面板语义不受影响
+    await svc.stop();
+  });
+
+  it('attachments.get：临时文件中转契约（tmpPath + bytes，无 base64 面）', async () => {
+    const svc = buildService(makeDeps({
+      mailparserLib: { simpleParser: async () => ({ text: 't', html: null, attachments: [{ partId: '1.1', filename: 'a.pdf', contentType: 'application/pdf', content: Buffer.from('pdf-bytes') }] }) },
+    }));
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    const r = await svc.handle('attachments.get', { accountId: acc.id, folder: 'INBOX', uid: 1, partId: '1.1' }) as { tmpPath: string; filename: string; bytes: number };
+    expect(r.filename).toBe('a.pdf');
+    expect(r.bytes).toBe('pdf-bytes'.length);
+    expect(typeof r.tmpPath).toBe('string');
+    expect(r.tmpPath.startsWith(path.join(dir, 'tmp-relay'))).toBe(true);
+    expect(fs.readFileSync(r.tmpPath).toString()).toBe('pdf-bytes');
+    expect(r).not.toHaveProperty('base64');
+    fs.rmSync(r.tmpPath, { force: true });
+    await svc.stop();
+  });
+
+  it('attachments.get：partId 不存在 → 中文报错', async () => {
+    const svc = buildService(makeDeps());
+    const acc = await svc.handle('accounts.add', ACC_INPUT);
+    await expect(svc.handle('attachments.get', { accountId: acc.id, folder: 'INBOX', uid: 1, partId: '9.9' }))
+      .rejects.toThrow('附件不存在');
+    await svc.stop();
+  });
+
+  it('start 清扫 tmp-relay 过期孤儿（>1h），新文件保留', async () => {
+    const stale = path.join(dir, 'tmp-relay', 'stale.bin');
+    const fresh = path.join(dir, 'tmp-relay', 'fresh.bin');
+    fs.mkdirSync(path.dirname(stale), { recursive: true });
+    fs.writeFileSync(stale, 'x');
+    fs.writeFileSync(fresh, 'x');
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    fs.utimesSync(stale, old, old);
+    const svc = buildService(makeDeps());
+    await svc.start();
+    await svc.stop();
+    expect(fs.existsSync(stale)).toBe(false);
+    expect(fs.existsSync(fresh)).toBe(true);
   });
 
   it('FakeImapFlow 保真：未选箱直接 search/fetchOne 必须抛（建模真实 ImapFlow 语义）', async () => {
@@ -335,6 +470,11 @@ describe('archive 路由与生命周期（2026-11-05 归档 spec §7/§9/§10.1�
       override async *fetch() {
         if (!this.selectedFolder) throw new Error('No mailbox selected');
         yield { uid: 1, envelope: { subject: 'old', from: [{ address: 'a@b.c' }], to: [{ address: 'm@n.o' }], date: new Date('2026-09-01T00:00:00Z') }, flags: new Set(), bodyStructure: {}, size: 100 };
+      }
+      // 在线读信走 fetchOne 单封信封（2026-11-11 起）：归档行 msg_date 取自此，须同样给旧日期
+      override async fetchOne() {
+        if (!this.selectedFolder) throw new Error('No mailbox selected');
+        return { uid: 1, source: Buffer.from('MIME'), envelope: { subject: 'old', from: [{ address: 'a@b.c' }], to: [{ address: 'm@n.o' }], date: new Date('2026-09-01T00:00:00Z') }, flags: new Set(), bodyStructure: {}, size: 100 };
       }
     }
     const svc = buildService(makeDeps({ imapflow: OldMail }));

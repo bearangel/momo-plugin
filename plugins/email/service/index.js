@@ -3,6 +3,7 @@
 'use strict';
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { createAccountStore } = require('./lib/accounts');
 const { createStore } = require('./lib/store');
 const { createEnvelopeCache } = require('./lib/envelope-cache');
@@ -48,7 +49,10 @@ function imapAdapterFor(ImapFlow) {
       host: account.imap.host, port: account.imap.port, secure,
       requireTLS: !secure,
       auth: { user: account.username, pass: password },
-      logger: false,
+      // 验收期协议追踪开关（2026-11-11 e2e）：MOMO_EMAIL_IMAP_TRACE=1 时打 IMAP 会话日志
+      logger: process.env.MOMO_EMAIL_IMAP_TRACE === '1'
+        ? { debug: (...a) => console.log('[imap]', JSON.stringify(a)), error: (...a) => console.error('[imap-err]', JSON.stringify(a)) }
+        : false,
     });
     // imapflow 空闲超时（Socket timeout/ETIMEOUT）经 emit('error') 上抛——不挂监听会变成
     // 主进程未捕获异常（Electron 弹 Uncaught Exception 窗）。imapflow 自身已按错误类型收尾
@@ -75,7 +79,7 @@ function imapAdapterFor(ImapFlow) {
       },
       fetchEnvelopes: async (folder, uids) => withMailbox(folder, async () => {
         const out = [];
-        for await (const msg of client.fetch(uids, { envelope: true, bodyStructure: true, size: true }, { uid: true })) {
+        for await (const msg of client.fetch(uids, { envelope: true, bodyStructure: true, size: true, flags: true }, { uid: true })) {
           out.push({
             uid: msg.uid,
             subject: msg.envelope?.subject ?? '',
@@ -88,6 +92,27 @@ function imapAdapterFor(ImapFlow) {
           });
         }
         return out;
+      }),
+      // 单封信封（读信/取附件的在线路径专用）：字段映射与 fetchEnvelopes 同构；未命中返回 null
+      fetchEnvelope: async (folder, uid) => withMailbox(folder, async () => {
+        const msg = await client.fetchOne(String(uid), { envelope: true, bodyStructure: true, size: true, flags: true }, { uid: true });
+        if (!msg) return null;
+        return {
+          uid: msg.uid,
+          subject: msg.envelope?.subject ?? '',
+          from: msg.envelope?.from?.[0]?.address ?? '',
+          to: msg.envelope?.to?.[0]?.address ?? '',
+          date: msg.envelope?.date?.toISOString?.() ?? null,
+          seen: Boolean(msg.flags?.has?.('\\Seen')),
+          hasAttachments: Boolean(msg.bodyStructure?.childNodes?.some?.((c) => c.disposition === 'attachment')),
+          size: msg.size ?? 0,
+        };
+      }),
+      markSeen: async (folder, uid) => withMailbox(folder, async () => {
+        // messageFlagsAdd 失败时 resolveRange/run 可静默返回 false（如服务器拒 STORE）——
+        // 必须显式判 false 抛错，否则 markSeenAndSync 误判成功并回写本地缓存 seen=true
+        const ok = await client.messageFlagsAdd(String(uid), ['\\Seen'], { uid: true });
+        if (ok !== true) throw new Error(`messageFlagsAdd 未能标记已读（uid=${uid}，返回 ${String(ok)}）`);
       }),
       fetchSource: async (folder, uid) => withMailbox(folder, async () => {
         const r = await client.fetchOne(String(uid), { source: true }, { uid: true });
@@ -121,6 +146,27 @@ function buildService(deps) {
   const getConfig = deps.config ?? (() => ({}));
   const smtpTimeoutMs = deps.smtpTimeoutMs ?? 8000;
   fs.mkdirSync(dataDir, { recursive: true });
+
+  // 附件临时文件中转（2026-11-11）：附件字节不过 IPC 桥（桥只传 tmpPath），
+  // 工具侧（save_attachment）门禁校验后本地拷贝、用完即删；孤儿由 start 清扫。
+  const tmpRelayDir = path.join(dataDir, 'tmp-relay');
+  const TMP_RELAY_MAX_AGE_MS = 60 * 60 * 1000;
+  function relayAttachment(att) {
+    fs.mkdirSync(tmpRelayDir, { recursive: true });
+    const tmpPath = path.join(tmpRelayDir, `att-${process.pid}-${Date.now()}-${crypto.randomUUID()}.bin`);
+    fs.writeFileSync(tmpPath, att.content);
+    return { tmpPath, filename: att.filename, contentType: att.contentType, bytes: att.content.length };
+  }
+  function sweepTmpRelay() {
+    try {
+      const cutoff = Date.now() - TMP_RELAY_MAX_AGE_MS;
+      for (const name of fs.readdirSync(tmpRelayDir)) {
+        const abs = path.join(tmpRelayDir, name);
+        try { if (fs.statSync(abs).mtimeMs < cutoff) fs.unlinkSync(abs); } catch { /* 单文件失败不阻断清扫 */ }
+      }
+    } catch { /* 目录不存在视为干净 */ }
+  }
+
   const accountStore = createAccountStore({ dataDir, secrets });
   const store = createStore({ dataDir });
   const cache = createEnvelopeCache({ store });
@@ -220,8 +266,9 @@ function buildService(deps) {
     'mails.refresh': (p) => withHealth(p.accountId, () => mailbox.envelopes(p.accountId, p.folder ?? 'INBOX',
       { force: true, filter: p.filter, page: p.page, pageSize: p.pageSize })),
     'mails.peek': (p) => mailbox.envelopesPeek(p.accountId, p.folder ?? 'INBOX', { page: p.page, pageSize: p.pageSize }),
-    'mails.get': (p) => withHealth(p.accountId, () => mailbox.read(p.accountId, p.folder, p.uid)),
-    'attachments.get': (p) => withHealth(p.accountId, () => mailbox.attachment(p.accountId, p.folder, p.uid, p.partId)),
+    'mails.get': (p) => withHealth(p.accountId, () => mailbox.read(p.accountId, p.folder, p.uid,
+      { patient: p.patient === true, warmup: p.warmup === true })),
+    'attachments.get': (p) => withHealth(p.accountId, async () => relayAttachment(await mailbox.attachment(p.accountId, p.folder, p.uid, p.partId))),
     'drafts.save': async (p) => {
       // '__first__' = 工具侧首账号回退哨兵（draft_mail 未指定 accountId 时）
       let accountId = p.accountId;
@@ -287,6 +334,7 @@ function buildService(deps) {
 
   return {
     async start() {
+      sweepTmpRelay();
       await reconcileArchiveRoot();
       await drafts.sweep();
       try {
