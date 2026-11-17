@@ -76,9 +76,10 @@ describe('explain 前置只读校验（终审 C2）', () => {
     const f = fakeDriver();
     const d = createDispatcher(() => ({ createPool: async () => f.pool }));
     await d.dispatch('configure', { connections: CFG() });
+    const explainSpy = vi.spyOn(f.pool, 'explain');
     await expect(d.dispatch('explain', { connection: 'c1', sql: 'ANALYZE DELETE FROM t' }))
       .rejects.toMatchObject({ code: 'readonly_rejected' });
-    expect(f.pool.explain).not.toHaveBeenCalled();
+    expect(explainSpy).not.toHaveBeenCalled();
   });
   it('合法 SELECT 的 explain 不受影响', async () => {
     const f = fakeDriver();
