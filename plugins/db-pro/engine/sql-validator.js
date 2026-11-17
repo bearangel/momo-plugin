@@ -6,8 +6,10 @@
 // 误杀面由剥离步骤消除；仍误杀的合法 SQL 接受并引导改写（spec R4）。
 
 const READ_FIRST_WORDS = new Set(['select', 'show', 'describe', 'desc', 'explain', 'with']);
-/** 锁定与文件导出子句：全文检测（含子查询内——误杀可接受，spec R4） */
-const DENY_CLAUSES = /\bfor\s+update\b|\bfor\s+share\b|\block\s+in\s+share\s+mode\b|\binto\s+(outfile|dumpfile)\b/i;
+/** 锁定与文件导出/重定向子句：全文检测（含子查询内——误杀可接受，spec R4）。
+ *  普通 INTO 一并禁（终审 C1：PG SELECT INTO 建表 / 数据修改 CTE 的重定向通道）；
+ *  MySQL INTO @var 会话变量属写侧语义，误杀可接受（R4） */
+const DENY_CLAUSES = /\bfor\s+update\b|\bfor\s+share\b|\block\s+in\s+share\s+mode\b|\binto\b/i;
 /** 外层写关键词（仅 SELECT/WITH 主语句检测——SHOW CREATE TABLE 等不误杀） */
 const WRITE_KEYWORDS = /\b(insert|update|delete|merge|create|drop|alter|truncate|rename|grant|revoke|call|exec|execute|lock|load|set|vacuum|analyze|comment|audit|flashback|purge|shutdown|commit|rollback|savepoint)\b/i;
 
@@ -81,9 +83,11 @@ function assertReadOnly(sqlRaw) {
     return { ok: false, reason: `首词 "${firstWord || '(空)'}" 不在只读白名单（SELECT/SHOW/DESCRIBE/EXPLAIN/WITH）。写操作请使用 write 工具发起人工批准。` };
   }
   if (firstWord === 'select' || firstWord === 'with') {
-    const m = skeleton.match(WRITE_KEYWORDS);
+    // 终审 C1：全文检测（stripped——字面量/注释已剥离）而非骨架——括号内
+    //（子查询/CTE 体）的写词不再被挖空放过；引号标识符经剥离不受误杀（R4 兜底）
+    const m = stripped.match(WRITE_KEYWORDS);
     if (m) {
-      return { ok: false, reason: `外层语句包含写关键词 "${m[0].toUpperCase()}"。写操作请使用 write 工具发起人工批准。` };
+      return { ok: false, reason: `语句包含写关键词 "${m[0].toUpperCase()}"。写操作请使用 write 工具发起人工批准。` };
     }
   }
   return { ok: true };

@@ -62,7 +62,13 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
       case 'meta.describe': return await mustPool(params.connection).describe(params.schema, params.table);
       case 'meta.columns': return { columns: await mustPool(params.connection).columns(params.schema, params.table) };
       case 'meta.ddl': return { ddl: await mustPool(params.connection).ddl(params.schema, params.table) };
-      case 'explain': return await mustPool(params.connection).explain(params.sql);
+      // explain 前置只读校验（终审 C2）：EXPLAIN ANALYZE 在 PG 会真实执行所附
+      // 语句——写语句走 explain 与走 query 同样必须被拦（首词白名单天然拒 ANALYZE/DML）
+      case 'explain': {
+        const explainCheck = assertReadOnly(params.sql);
+        if (!explainCheck.ok) throw new EngineError(CODES.VALIDATION, explainCheck.reason);
+        return await mustPool(params.connection).explain(params.sql);
+      }
       // exec 仅由 service 在人工批准后调用（spec §6.2：引擎协议不暴露给 agent）
       case 'exec': return await mustPool(params.connection).exec(params.sql);
       default: throw new EngineError(CODES.UNKNOWN_METHOD, `未知方法: ${method}`);

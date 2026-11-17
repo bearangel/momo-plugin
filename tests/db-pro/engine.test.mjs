@@ -1,5 +1,5 @@
 // 引擎主体单测：fake 驱动注入——configure diff / 只读校验接线 / 未配置连接错误 / 未知方法
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import engineMod from '../../plugins/db-pro/engine/engine.js';
 const { createDispatcher } = engineMod;
 
@@ -67,5 +67,24 @@ describe('createDispatcher', () => {
     await d.dispatch('configure', { connections: CFG() });
     const r = await d.dispatch('exec', { connection: 'c1', sql: 'UPDATE t SET a=1' });
     expect(r.affectedRows).toBe(1);
+  });
+});
+
+// 终审 C2：explain 路径前置只读校验（EXPLAIN ANALYZE 在 PG 会真实执行写语句）
+describe('explain 前置只读校验（终审 C2）', () => {
+  it('explain_query 传 ANALYZE DELETE → readonly_rejected', async () => {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    await expect(d.dispatch('explain', { connection: 'c1', sql: 'ANALYZE DELETE FROM t' }))
+      .rejects.toMatchObject({ code: 'readonly_rejected' });
+    expect(f.pool.explain).not.toHaveBeenCalled();
+  });
+  it('合法 SELECT 的 explain 不受影响', async () => {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    const r = await d.dispatch('explain', { connection: 'c1', sql: 'SELECT * FROM t' });
+    expect(r.text).toBe('plan');
   });
 });
