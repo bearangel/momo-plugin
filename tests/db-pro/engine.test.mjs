@@ -89,3 +89,23 @@ describe('explain 前置只读校验（终审 C2）', () => {
     expect(r.text).toBe('plan');
   });
 });
+
+// 终审 I2：单连接失败不拖垮整批 configure（坏槽只记 unavailable，好连接可用）
+describe('applyConfigure 逐连接隔离（终审 I2）', () => {
+  it('坏 URL 槽位 → configure 成功 configured=1，坏名查询给人话错误', async () => {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }));
+    const r = await d.dispatch('configure', {
+      connections: [
+        { name: 'good', url: 'mysql://u:p@h/db', queryTimeoutMs: 30000 },
+        { name: 'bad', url: 'not-a-url', queryTimeoutMs: 30000 },
+      ],
+    });
+    expect(r.configured).toBe(1);
+    expect(r.unavailable).toEqual([expect.objectContaining({ name: 'bad' })]);
+    const q = await d.dispatch('query', { connection: 'good', sql: 'SELECT 1' });
+    expect(q.rows).toEqual([[1]]);
+    await expect(d.dispatch('query', { connection: 'bad', sql: 'SELECT 1' }))
+      .rejects.toMatchObject({ code: 'connection_failed' });
+  });
+});

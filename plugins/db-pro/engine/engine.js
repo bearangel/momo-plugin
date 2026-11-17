@@ -14,10 +14,15 @@ const DIALECT_LOADERS = {
 };
 
 function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new Map()) {
+  // 坏连接名 → 失败原因（configure 逐连接隔离，终审 I2：单连接失败不拖垮整批）
+  const unavailable = new Map();
+
   function mustPool(name) {
     const h = pools.get(name);
-    if (!h) throw new EngineError(CODES.CONN, `未配置的连接 "${name}"——请在插件设置中配置后重试`);
-    return h.pool;
+    if (h) return h.pool;
+    const reason = unavailable.get(name);
+    if (reason) throw new EngineError(CODES.CONN, `连接 "${name}" 配置失败：${reason}——请修正连接串后重试`);
+    throw new EngineError(CODES.CONN, `未配置的连接 "${name}"——请在插件设置中配置后重试`);
   }
 
   async function applyConfigure(connections) {
@@ -30,24 +35,30 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         void h.pool.close().catch(() => undefined);
       }
     }
-    // 新建
+    // 新建：逐连接 try/catch（终审 I2）——坏槽记 unavailable 不炸整批 configure
     for (const c of connections ?? []) {
       const cur = pools.get(c.name);
       if (cur && cur.url === c.url && cur.queryTimeoutMs === c.queryTimeoutMs) continue;
-      const proto = new URL(c.url).protocol.replace(':', '');
-      const loader = DIALECT_LOADERS[proto];
-      if (!loader) throw new EngineError(CODES.CONN, `不支持的连接协议 "${proto}://"（支持 mysql/postgres/oracle/dm）`);
-      const pool = await loadDriver(proto).createPool(c.url, { queryTimeoutMs: c.queryTimeoutMs });
-      pools.set(c.name, { name: c.name, url: c.url, queryTimeoutMs: c.queryTimeoutMs, pool });
+      pools.delete(c.name);
+      unavailable.delete(c.name);
+      try {
+        const proto = new URL(c.url).protocol.replace(':', '');
+        const loader = DIALECT_LOADERS[proto];
+        if (!loader) throw new EngineError(CODES.CONN, `不支持的连接协议 "${proto}://"（支持 mysql/postgres/oracle/dm）`);
+        const pool = await loadDriver(proto).createPool(c.url, { queryTimeoutMs: c.queryTimeoutMs });
+        pools.set(c.name, { name: c.name, url: c.url, queryTimeoutMs: c.queryTimeoutMs, pool });
+      } catch (err) {
+        unavailable.set(c.name, err instanceof Error ? err.message : String(err));
+      }
     }
+    return { configured: pools.size, unavailable: [...unavailable.entries()].map(([name, reason]) => ({ name, reason })) };
   }
 
   async function dispatch(method, params) {
     switch (method) {
       case 'ping': return { ready: true };
       case 'configure':
-        await applyConfigure(params.connections);
-        return { configured: pools.size };
+        return await applyConfigure(params.connections);
       case 'connTest':
         await mustPool(params.name).ping();
         return { ok: true };

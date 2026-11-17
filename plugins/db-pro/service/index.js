@@ -116,8 +116,10 @@ function createService(ctx) {
   async function ensureConfig() {
     const conns = connectionsFromConfig(ctx.getConfig());
     if (diffConnections(lastConnections, conns)) {
-      lastConnections = conns;
+      // 先 configure 成功再提交 lastConnections（终审 I1）：失败时 diff 仍判变，
+      // 下次调用即重试——不会把失败配置楔死到重启
       await rpc('configure', { connections: conns }, ENGINE_BOOT_TIMEOUT_MS);
+      lastConnections = conns;
     }
   }
 

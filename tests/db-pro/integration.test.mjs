@@ -104,6 +104,7 @@ describe.skipIf(!ON)('四库集成', () => {
         if (!up) return;
         const ddl = await pool.ddl(undefined, c.table);
         expect(String(ddl).toUpperCase()).toContain(c.ddlContains);
+        if (c.dialect === 'postgres') expect(String(ddl)).toContain('"public"."dbpro_t"'); // M1：缺省 schema 不落 undefined
       });
       it('explain（达梦走 lastExecInfo 特化——本用例即仲裁点）', async () => {
         if (!up) return;

@@ -79,8 +79,23 @@ describe('write.status（两段式全转移）', () => {
     expect(await h.state.status({ requestId: 'r' })).toEqual({ status: 'executed', affectedRows: 3, replayed: true });
     expect(h.execSql).toHaveBeenCalledTimes(1);
   });
-  it('重启恢复：write-log.jsonl 已记录的 requestId 不再执行（Review Focus #3）', async () => {
+  it('执行中断窗口（终审 I3）：exec 失败后重查返回 exec_unknown，绝不重执行', async () => {
     const h = mkHarness();
+    h.execSql.mockRejectedValueOnce(new Error('引擎请求超时'));
+    const row = {
+      id: 'r-3', status: 'answered',
+      answerJson: JSON.stringify({ decision: 'approve' }),
+      payloadJson: '{"db":{"connection":"c","sql":"UPDATE t SET a=1","opClass":"DML"}}',
+    };
+    h.humanGate.status.mockResolvedValue(row);
+    // 首查：exec 超时——attempting 已落日志，错误向 agent 透出
+    await expect(h.state.status({ requestId: 'r-3' })).rejects.toThrow(/超时/);
+    // 重查：结果未知 → exec_unknown 人话，不再调用 execSql（宁可重查不可重执行，spec D7）
+    expect(await h.state.status({ requestId: 'r-3' })).toMatchObject({ status: 'exec_unknown' });
+    expect(h.execSql).toHaveBeenCalledTimes(1);
+  });
+
+  it('重启恢复：write-log.jsonl 已记录的 requestId 不再执行（Review Focus #3）', async () => {    const h = mkHarness();
     fs.appendFileSync(path.join(h.dataDir, 'write-log.jsonl'), JSON.stringify({ requestId: 'done-1', affectedRows: 7, at: 1 }) + '\n');
     const state2 = stateMod.createWriteState({
       humanGate: () => h.humanGate, execSql: h.execSql, dataDir: h.dataDir, log: () => undefined,

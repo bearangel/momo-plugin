@@ -102,7 +102,7 @@ async function createPool(connUrl, opts = {}) {
         `  ${qi(c.name)} ${c.type}${c.nullable === false ? ' NOT NULL' : ''}${c.default !== null ? ` DEFAULT ${c.default}` : ''}`);
       const pk = d.indexes[0]?.columns ?? [];
       if (pk.length > 0) lines.push(`  PRIMARY KEY (${pk.map(qi).join(', ')})`);
-      return `-- PG DDL 由 catalog 拼装（spec §4.4）\nCREATE TABLE ${qi(schema)}.${qi(table)} (\n${lines.join(',\n')}\n);`;
+      return `-- PG DDL 由 catalog 拼装（spec §4.4）\nCREATE TABLE ${qi(s)}.${qi(table)} (\n${lines.join(',\n')}\n);`;
     },
     async explain(sql) {
       const r = await run(`EXPLAIN ${sql}`, [], 64);
