@@ -23,6 +23,7 @@ function readLogEntries(dataDir) {
 
 function createWriteState({ humanGate, execSql, dataDir, log }) {
   const writeLogPath = path.join(dataDir, WRITE_LOG);
+  // Map<requestId, entry>：同 requestId 多行时后行覆盖前行（attempting → executed 顺序）
   const executed = new Map(readLogEntries(dataDir).map((e) => [e.requestId, e]));
 
   function appendLog(entry) {
@@ -66,15 +67,28 @@ function createWriteState({ humanGate, execSql, dataDir, log }) {
       return { status: 'unknown', note: `意外答复形态: ${row.answerJson ?? '（空）'}` };
     }
     if (executed.has(requestId)) {
-      return { status: 'executed', affectedRows: executed.get(requestId).affectedRows, replayed: true };
+      const prior = executed.get(requestId);
+      // 终审 I3：attempting 无 executed 后续行 = 执行中断、结果未知——宁可重查
+      // 不可重执行（spec D7）；人话引导人工核查或重新发起写请求
+      if (prior.status === 'attempting') {
+        return {
+          status: 'exec_unknown',
+          note: '此前执行中断（超时/引擎崩溃），结果未知——请人工核查数据库实际状态后重新发起写请求',
+        };
+      }
+      return { status: 'executed', affectedRows: prior.affectedRows, replayed: true };
     }
     let payload = null;
     try { payload = row.payloadJson ? JSON.parse(row.payloadJson).db : null; } catch { payload = null; }
     if (!payload || typeof payload.sql !== 'string' || typeof payload.connection !== 'string') {
       return { status: 'invalid_payload' };
     }
+    // 先落 attempting 再执行（终审 I3）：exec 中断后重查按结果未知处理，不重执行
+    const attempting = { requestId, status: 'attempting', at: Date.now() };
+    executed.set(requestId, attempting);
+    appendLog(attempting);
     const r = await execSql(payload.connection, payload.sql);
-    const entry = { requestId, affectedRows: r.affectedRows, at: Date.now() };
+    const entry = { requestId, status: 'executed', affectedRows: r.affectedRows, at: Date.now() };
     executed.set(requestId, entry);
     appendLog(entry);
     return { status: 'executed', affectedRows: r.affectedRows };
