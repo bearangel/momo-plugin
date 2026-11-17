@@ -13,7 +13,7 @@ describe('createLineFramer', () => {
   });
   it('空行跳过 + flush 冲刷尾部残留', () => {
     const f = createLineFramer();
-    expect(f.feed('  \n{"x"')).toEqual([]);
+    expect(f.feed('  \n{"x"}')).toEqual([]);
     expect(f.flush()).toEqual(['{"x"}']);
   });
 });
@@ -42,6 +42,7 @@ describe('runServer', () => {
       runServer(async () => { throw new EngineError(CODES.VALIDATION, '只读拒绝'); });
       emit('{"id":1,"method":"x"}\n');
       await settle();
+      process.stdin.removeAllListeners('data'); // runServer 一次一监听器：换 dispatcher 前清场
       runServer(async () => { throw new Error('boom'); });
       emit('{"id":2,"method":"x"}\n');
       emit('not-json\n');
