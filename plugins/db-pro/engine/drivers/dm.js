@@ -6,6 +6,9 @@
 //   createPool({connectString: 'dm://user:pwd@host:port'})——分离 host/port 报 [20001]，
 //   host:port 裸串报 "URL must start with 'dm://'"；Pool 无 execute，须 getConnection。
 const dmdb = require('dmdb');
+// CLOB 结果列直接取文本（DBMS_METADATA.GET_DDL 等）——否则回 Lob 对象（内含
+// BigInt 字段，JSON.stringify 抛异常；index.d.ts：fetchAsString 可选 CLOB）
+dmdb.fetchAsString = [dmdb.CLOB];
 
 function parseUrl(url) {
   const u = new URL(url);
@@ -46,6 +49,16 @@ function normalizeRows(res) {
   return { columns, rows };
 }
 
+/** 单元格归一：BigInt（含对象包装——dmdb 数值列）转字符串，对象值串化 */
+function dmCell(c) {
+  if (c === null || c === undefined) return c;
+  if (c instanceof Date) return c;
+  const v = typeof c === 'object' && typeof c.valueOf === 'function' ? c.valueOf() : c;
+  if (typeof v === 'bigint') return v.toString();
+  if (typeof v !== 'object' || v === null) return v;
+  return JSON.stringify(c);
+}
+
 async function createPool(connUrl, opts = {}) {
   const cfg = parseUrl(connUrl);
   void opts; // queryTimeoutMs 由 SQL 层管（dmdb 无池级超时选项——集成实测如可注入再补）
@@ -64,22 +77,20 @@ async function createPool(connUrl, opts = {}) {
     return await withConn(async (conn) => {
       const res = await conn.execute(sql, binds ?? {});
       const { columns, rows } = normalizeRows(res);
-      const norm = rows.map((r) => r.map((c) => {
-        if (c === null || typeof c !== 'object' || c instanceof Date) return c;
-        return JSON.stringify(c);
-      }));
+      const norm = rows.map((r) => r.map(dmCell));
       const truncated = norm.length > maxRows;
       return { columns, rows: truncated ? norm.slice(0, maxRows) : norm, total: norm.length, truncated };
     });
   }
 
   async function describe(schema, table) {
+    const s = schema ?? cfg.schema;
     const cols = await runRows(
       `SELECT COLUMN_NAME, DATA_TYPE, NULLABLE, DATA_DEFAULT
          FROM ALL_TAB_COLUMNS WHERE OWNER = :o AND TABLE_NAME = :t ORDER BY COLUMN_ID`,
-      { o: schema, t: table }, 2_000);
+      { o: s, t: table }, 2_000);
     const est = await runRows(
-      `SELECT NUM_ROWS FROM ALL_TABLES WHERE OWNER = :o AND TABLE_NAME = :t`, { o: schema, t: table }, 1);
+      `SELECT NUM_ROWS FROM ALL_TABLES WHERE OWNER = :o AND TABLE_NAME = :t`, { o: s, t: table }, 1);
     return {
       columns: cols.rows.map(([name, type, nullable, dflt]) => ({
         name: String(name), type: String(type), nullable: String(nullable) === 'Y', default: dflt ?? null, key: '', comment: '',
@@ -121,8 +132,9 @@ async function createPool(connUrl, opts = {}) {
     },
     async ddl(schema, table) {
       // DM8 兼容 DBMS_METADATA 包；若集成实测不可用，改 catalog 拼装（同 pg.js ddl 实现）
+      const s = schema ?? cfg.schema;
       const r = await runRows(
-        `SELECT DBMS_METADATA.GET_DDL('TABLE', :t, :s) FROM DUAL`, { t: table, s: schema }, 1);
+        `SELECT DBMS_METADATA.GET_DDL('TABLE', :t, :s) FROM DUAL`, { t: table, s }, 1);
       return String(r.rows[0]?.[0] ?? '');
     },
     async explain(sql) {

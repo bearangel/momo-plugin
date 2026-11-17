@@ -51,19 +51,20 @@ async function createPool(connUrl, opts = {}) {
   }
 
   async function describe(schema, table) {
+    const s = schema ?? cfg.database;
     const cols = await run(
       `SELECT column_name, column_type, is_nullable, column_default, column_key, column_comment
          FROM information_schema.columns
-        WHERE table_schema = ${lit(schema)} AND table_name = ${lit(table)}
+        WHERE table_schema = ${lit(s)} AND table_name = ${lit(table)}
         ORDER BY ordinal_position`, 2_000);
     const idx = await run(
       `SELECT index_name, column_name, non_unique
          FROM information_schema.statistics
-        WHERE table_schema = ${lit(schema)} AND table_name = ${lit(table)}
+        WHERE table_schema = ${lit(s)} AND table_name = ${lit(table)}
         ORDER BY seq_in_index`, 2_000);
     const est = await run(
       `SELECT table_rows FROM information_schema.tables
-        WHERE table_schema = ${lit(schema)} AND table_name = ${lit(table)}`, 1);
+        WHERE table_schema = ${lit(s)} AND table_name = ${lit(table)}`, 1);
     const byName = new Map();
     const indexes = [];
     for (const [name, column, nonUnique] of idx.rows) {
@@ -111,7 +112,8 @@ async function createPool(connUrl, opts = {}) {
       return (await describe(schema, table)).columns;
     },
     async ddl(schema, table) {
-      const r = await run(`SHOW CREATE TABLE ${quoteIdent(schema)}.${quoteIdent(table)}`, 1);
+      const s = schema ?? cfg.database;
+      const r = await run(`SHOW CREATE TABLE ${quoteIdent(s)}.${quoteIdent(table)}`, 1);
       return String(r.rows[0]?.[1] ?? '');
     },
     async explain(sql) {

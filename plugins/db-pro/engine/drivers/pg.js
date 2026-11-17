@@ -38,6 +38,7 @@ async function createPool(connUrl, opts = {}) {
   }
 
   async function describe(schema, table) {
+    const s = schema ?? 'public';
     const cols = await run(
       `SELECT c.column_name, c.data_type, c.is_nullable, c.column_default, pgd.description
          FROM information_schema.columns c
@@ -46,13 +47,13 @@ async function createPool(connUrl, opts = {}) {
          LEFT JOIN pg_catalog.pg_description pgd
            ON pgd.objoid = st.relid AND pgd.objsubid = c.ordinal_position
         WHERE c.table_schema = $1 AND c.table_name = $2
-        ORDER BY c.ordinal_position`, [schema, table], 2_000);
+        ORDER BY c.ordinal_position`, [s, table], 2_000);
     const pk = await run(
       `SELECT a.attname
          FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-        WHERE i.indrelid = ($1 || '.' || $2)::regclass AND i.indisprimary`, [schema, table], 100);
+        WHERE i.indrelid = ($1 || '.' || $2)::regclass AND i.indisprimary`, [s, table], 100);
     const est = await run(
-      `SELECT reltuples::bigint FROM pg_class WHERE oid = ($1 || '.' || $2)::regclass`, [schema, table], 1);
+      `SELECT reltuples::bigint FROM pg_class WHERE oid = ($1 || '.' || $2)::regclass`, [s, table], 1);
     return {
       columns: cols.rows.map(([name, type, nullable, dflt, comment]) => ({
         name, type, nullable: nullable === 'YES', default: dflt ?? null,
@@ -95,7 +96,8 @@ async function createPool(connUrl, opts = {}) {
       return (await describe(schema, table)).columns;
     },
     async ddl(schema, table) {
-      const d = await describe(schema, table);
+      const s = schema ?? 'public';
+      const d = await describe(s, table);
       const lines = d.columns.map((c) =>
         `  ${qi(c.name)} ${c.type}${c.nullable === false ? ' NOT NULL' : ''}${c.default !== null ? ` DEFAULT ${c.default}` : ''}`);
       const pk = d.indexes[0]?.columns ?? [];

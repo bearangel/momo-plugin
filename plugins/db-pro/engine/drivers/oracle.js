@@ -57,22 +57,23 @@ async function createPool(connUrl, opts = {}) {
   }
 
   async function describe(schema, table) {
+    const o = schema ?? cfg.user.toUpperCase();
     const cols = await runRows(
       `SELECT column_name,
               data_type || CASE WHEN char_length IS NOT NULL THEN '(' || char_length || ')' ELSE '' END,
               nullable, data_default
          FROM all_tab_columns WHERE owner = :o AND table_name = :t ORDER BY column_id`,
-      { o: schema, t: table }, 2_000);
+      { o, t: table }, 2_000);
     const idxCols = await runRows(
       `SELECT i.index_name, c.column_name, i.uniqueness
          FROM all_indexes i
          JOIN all_ind_columns c ON c.index_name = i.index_name AND c.index_owner = i.owner
         WHERE i.table_owner = :o AND i.table_name = :t
         ORDER BY c.column_position`,
-      { o: schema, t: table }, 2_000);
+      { o, t: table }, 2_000);
     const est = await runRows(
       `SELECT num_rows FROM all_tables WHERE owner = :o AND table_name = :t`,
-      { o: schema, t: table }, 1);
+      { o, t: table }, 1);
     const byName = new Map();
     const indexes = [];
     for (const [name, column, uniq] of idxCols.rows) {
@@ -124,8 +125,9 @@ async function createPool(connUrl, opts = {}) {
       return (await describe(schema, table)).columns;
     },
     async ddl(schema, table) {
+      const s = schema ?? cfg.user.toUpperCase();
       const r = await runRows(
-        `SELECT DBMS_METADATA.GET_DDL('TABLE', :t, :s) FROM dual`, { t: table, s: schema }, 1);
+        `SELECT DBMS_METADATA.GET_DDL('TABLE', :t, :s) FROM dual`, { t: table, s }, 1);
       return String(r.rows[0]?.[0] ?? '');
     },
     async explain(sql) {
