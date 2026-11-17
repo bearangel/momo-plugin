@@ -10,12 +10,12 @@ const DEFS = [
   {
     name: 'list_connections',
     description: '列出已配置的数据库连接（名称 + 类型，不含凭据）。查询前先调用此工具确认可用连接。',
-    parameters: { type: 'object', properties: {}, required: [] },
+    inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
     name: 'list_schemas',
     description: '列出指定数据库的 schema 清单。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: { connection: { type: 'string', description: '连接名（省略用缺省连接）' } },
       required: [],
@@ -24,7 +24,7 @@ const DEFS = [
   {
     name: 'list_tables',
     description: '列出表清单（含视图，type 区分）。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
@@ -36,7 +36,7 @@ const DEFS = [
   {
     name: 'list_views',
     description: '列出视图清单。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
@@ -48,7 +48,7 @@ const DEFS = [
   {
     name: 'describe_table',
     description: '表结构概要：列 / 索引 / 行数估算。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
@@ -61,7 +61,7 @@ const DEFS = [
   {
     name: 'list_columns',
     description: '列明细（名称/类型/可空/默认值/注释）。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
@@ -74,7 +74,7 @@ const DEFS = [
   {
     name: 'get_ddl',
     description: '建表 DDL（MySQL=SHOW CREATE；Oracle/达梦=DBMS_METADATA；PG=catalog 拼装）。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
@@ -87,7 +87,7 @@ const DEFS = [
   {
     name: 'query',
     description: '只读 SQL 查询。仅允许 SELECT / SHOW / DESCRIBE / EXPLAIN / WITH(主语句为 SELECT)；禁止多语句与 FOR UPDATE。默认行数上限 200、超时 30s。写操作必须用 write 工具。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
@@ -99,7 +99,7 @@ const DEFS = [
   {
     name: 'explain_query',
     description: '查看执行计划（达梦经 lastExecInfo 特化解析）。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
@@ -111,7 +111,7 @@ const DEFS = [
   {
     name: 'write',
     description: '发起写操作（INSERT/UPDATE/DELETE/MERGE=DML；CREATE/DROP/ALTER/TRUNCATE=DDL）。不直接执行——创建人工批准请求，须提醒用户在「人工请求」面板批准/拒绝，随后用 write_status 查询结果。批准前不得声称已执行。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: {
         connection: { type: 'string', description: '连接名（必填）' },
@@ -123,7 +123,7 @@ const DEFS = [
   {
     name: 'write_status',
     description: '查询写请求的人工批准状态。approved 时此刻执行并返回影响行数（同一请求只执行一次）；denied 返回拒绝理由；pending 表示仍在等待。',
-    parameters: {
+    inputSchema: {
       type: 'object',
       properties: { requestId: { type: 'string', description: 'write 返回的请求 ID' } },
       required: ['requestId'],

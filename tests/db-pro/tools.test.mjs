@@ -32,11 +32,18 @@ describe('createTools', () => {
     return { tools, callService, toolCtx };
   }
 
-  it('11 个工具定义 + 短名合法（宿主 SHORT_NAME_RE）', () => {
+  it('11 个工具定义 + 短名合法（宿主 SHORT_NAME_RE）+ 宿主契约字段 inputSchema', () => {
     const { tools } = mk();
     const defs = tools.getDefs();
     expect(defs).toHaveLength(11);
-    for (const d of defs) expect(d.name).toMatch(/^[a-z][a-z0-9_]*$/);
+    for (const d of defs) {
+      expect(d.name).toMatch(/^[a-z][a-z0-9_]*$/);
+      // 宿主 LLMToolDef 契约：inputSchema（非 OpenAI 风格 parameters）——
+      // 用错字段名会让 token 估算层拿到 undefined（验收 P0 实证）
+      expect(d.inputSchema).toEqual(expect.objectContaining({ type: 'object' }));
+      expect(d.inputSchema.properties).toBeDefined();
+      expect(d.inputSchema.required).toBeInstanceOf(Array);
+    }
     expect(defs.map((d) => d.name)).toEqual(expect.arrayContaining(['query', 'write', 'write_status']));
   });
 
