@@ -192,9 +192,11 @@ function createTools(ctx) {
     execute: async (name, args, toolCtx) => {
       const method = METHOD_OF[name];
       if (!method) throw new Error(`未知工具: ${name}`);
+      // sessionId 用 roomId：human_requests.session_id 外键指向 sessions.id（房间），
+      // 人工请求面板也按房间挂载——streamSessionId 是流 ID 非 sessions 行（验收 P0 实证）
       const res = await ctx.callService(
         method,
-        { ...args, sessionId: toolCtx.streamSessionId, taskId: toolCtx.taskId ?? null },
+        { ...args, sessionId: toolCtx.roomId, taskId: toolCtx.taskId ?? null },
         { timeoutMs: CALL_TIMEOUT_MS },
       );
       return render(name, res);

@@ -28,7 +28,9 @@ describe('createTools', () => {
       return { schemas: ['public'] };
     });
     const tools = createTools({ callService, logger: { info: () => {}, warn: () => {} } });
-    const toolCtx = { streamSessionId: 'sess-x', taskId: 'task-y' };
+    // sessionId 取 roomId（human_requests.session_id 外键 = sessions.id = 房间 ID；
+    // streamSessionId 是流 ID，非 sessions 行——写批准面板按房间挂载）
+    const toolCtx = { roomId: 'room-1', streamSessionId: 'stream-x', taskId: 'task-y' };
     return { tools, callService, toolCtx };
   }
 
@@ -51,7 +53,7 @@ describe('createTools', () => {
     const { tools, callService, toolCtx } = mk();
     const out = await tools.execute('query', { sql: 'SELECT 1' }, toolCtx);
     expect(callService).toHaveBeenCalledWith('query',
-      expect.objectContaining({ sql: 'SELECT 1', sessionId: 'sess-x', taskId: 'task-y' }),
+      expect.objectContaining({ sql: 'SELECT 1', sessionId: 'room-1', taskId: 'task-y' }),
       { timeoutMs: 60000 });
     expect(out).toContain('a');
     expect(out).toContain('1');
