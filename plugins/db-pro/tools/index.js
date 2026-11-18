@@ -161,7 +161,12 @@ function render(name, res) {
   }
   if (name === 'write_status') {
     if (res.status === 'executed') {
-      return `已执行${res.replayed ? '（此前已执行，本次返回缓存结果）' : ''}，影响行数: ${res.affectedRows}`;
+      const once = res.replayed ? '（此前已执行，本次返回缓存结果）' : '';
+      // DDL 建表/结构变更 affectedRows=0 是正确语义——按 opClass 分文案，
+      // 防 agent 把 0 行误读为失败反复补发（2026-11-18 实证）
+      if (res.opClass === 'DDL') return `DDL 已执行成功${once}（结构变更不产生行影响）`;
+      if (res.affectedRows === 0) return `已执行${once}，影响行数 0——无匹配行（目标可能已满足条件，请先查询核实再决定是否重发）`;
+      return `已执行${once}，影响行数: ${res.affectedRows}`;
     }
     if (res.status === 'denied') {
       return `用户拒绝了该写请求。${res.note ? `附言：${res.note}` : ''}`;

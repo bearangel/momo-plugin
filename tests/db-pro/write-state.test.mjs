@@ -74,9 +74,9 @@ describe('write.status（两段式全转移）', () => {
       payloadJson: '{"db":{"connection":"conn1","sql":"UPDATE t SET a=1","opClass":"DML"}}',
     };
     h.humanGate.status.mockResolvedValue(row);
-    expect(await h.state.status({ requestId: 'r' })).toEqual({ status: 'executed', affectedRows: 3 });
+    expect(await h.state.status({ requestId: 'r' })).toMatchObject({ status: 'executed', affectedRows: 3, opClass: 'DML' });
     expect(h.execSql).toHaveBeenCalledWith('conn1', 'UPDATE t SET a=1');
-    expect(await h.state.status({ requestId: 'r' })).toEqual({ status: 'executed', affectedRows: 3, replayed: true });
+    expect(await h.state.status({ requestId: 'r' })).toMatchObject({ status: 'executed', affectedRows: 3, opClass: 'DML', replayed: true });
     expect(h.execSql).toHaveBeenCalledTimes(1);
   });
   it('执行中断窗口（终审 I3）：exec 失败后重查返回 exec_unknown，绝不重执行', async () => {

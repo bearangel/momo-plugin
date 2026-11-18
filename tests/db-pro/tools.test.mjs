@@ -23,7 +23,7 @@ describe('createTools', () => {
     const callService = vi.fn(async (method) => {
       if (method === 'query') return { columns: ['a'], rows: [[1], [2]], total: 2, truncated: false };
       if (method === 'write') return { requestId: 'rq-1', status: 'pending' };
-      if (method === 'writeStatus') return { status: 'executed', affectedRows: 3 };
+      if (method === 'writeStatus') return { status: 'executed', affectedRows: 3, opClass: 'DML' };
       if (method === 'listConnections') return { connections: [{ name: 'conn1', dialect: 'mysql' }] };
       return { schemas: ['public'] };
     });
@@ -66,10 +66,30 @@ describe('createTools', () => {
     expect(out).toContain('批准');
   });
 
-  it('write_status：executed 渲染影响行数；未知工具拒绝', async () => {
+  it('write_status：executed 渲染影响行数；DDL 0 行/ DML 0 行分语义文案；未知工具拒绝', async () => {
     const { tools, toolCtx } = mk();
     const out = await tools.execute('write_status', { requestId: 'r' }, toolCtx);
     expect(out).toContain('3');
     await expect(tools.execute('bogus', {}, toolCtx)).rejects.toThrow(/未知工具/);
+  });
+});
+
+// 文案语义修复（2026-11-18 用户实测）：DDL affectedRows=0 被 agent 误读为失败
+// 反复补发——按 opClass 区分「结构变更无行影响」与「DML 无匹配行」。
+describe('write_status 文案语义', () => {
+  const mkStatus = (res) => {
+    const callService = vi.fn(async () => res);
+    return createTools({ callService, logger: { info: () => {}, warn: () => {} } });
+  };
+  it('DDL 0 行 → 「结构变更成功（不产生行影响）」', async () => {
+    const t = mkStatus({ status: 'executed', affectedRows: 0, opClass: 'DDL' });
+    const out = await t.execute('write_status', { requestId: 'r' }, { roomId: 'x', taskId: null });
+    expect(out).toContain('结构变更不产生行影响');
+    expect(out).not.toMatch(/影响行数: 0/);
+  });
+  it('DML 0 行 → 提示无匹配行（可能目标已满足）', async () => {
+    const t = mkStatus({ status: 'executed', affectedRows: 0, opClass: 'DML' });
+    const out = await t.execute('write_status', { requestId: 'r' }, { roomId: 'x', taskId: null });
+    expect(out).toContain('无匹配行');
   });
 });

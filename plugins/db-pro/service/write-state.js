@@ -76,7 +76,7 @@ function createWriteState({ humanGate, execSql, dataDir, log }) {
           note: '此前执行中断（超时/引擎崩溃），结果未知——请人工核查数据库实际状态后重新发起写请求',
         };
       }
-      return { status: 'executed', affectedRows: prior.affectedRows, replayed: true };
+      return { status: 'executed', affectedRows: prior.affectedRows, opClass: prior.opClass, replayed: true };
     }
     let payload = null;
     try { payload = row.payloadJson ? JSON.parse(row.payloadJson).db : null; } catch { payload = null; }
@@ -88,10 +88,10 @@ function createWriteState({ humanGate, execSql, dataDir, log }) {
     executed.set(requestId, attempting);
     appendLog(attempting);
     const r = await execSql(payload.connection, payload.sql);
-    const entry = { requestId, status: 'executed', affectedRows: r.affectedRows, at: Date.now() };
+    const entry = { requestId, status: 'executed', affectedRows: r.affectedRows, opClass: payload.opClass, at: Date.now() };
     executed.set(requestId, entry);
     appendLog(entry);
-    return { status: 'executed', affectedRows: r.affectedRows };
+    return { status: 'executed', affectedRows: r.affectedRows, opClass: payload.opClass };
   }
 
   return { request, status };
