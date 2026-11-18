@@ -72,6 +72,14 @@ describe.skipIf(!ON)('四库集成', () => {
         if (!up) return; // 容器未起 → 本库全部用例 skip 语义（it 内守卫）
         const mod = await DRIVER_OF[c.dialect]();
         const createPool = mod.default?.createPool ?? mod.createPool;
+        if (c.dialect === 'oracle') {
+          // 官方 free 镜像 PDBADMIN 仅 PDB_DBA 有限权限（CREATE TABLE → ORA-01031）
+          // ——system 预授 RESOURCE + USERS 配额（harness 环境准备，非被测路径）
+          const admin = await createPool('oracle://system:dbpro123@127.0.0.1:11521/FREEPDB1', { queryTimeoutMs: 15_000 });
+          await admin.exec('GRANT RESOURCE TO PDBADMIN').catch(() => undefined);
+          await admin.exec('ALTER USER PDBADMIN QUOTA UNLIMITED ON USERS').catch(() => undefined);
+          await admin.close();
+        }
         pool = await createPool(c.url(), { queryTimeoutMs: 15_000 });
       });
 
