@@ -1,0 +1,95 @@
+import { describe, it, expect, vi } from 'vitest';
+import fmt from '../../plugins/db-pro/engine/format.js';
+const { formatTable } = fmt;
+import toolsMod from '../../plugins/db-pro/tools/index.js';
+const { createTools } = toolsMod;
+
+describe('formatTable', () => {
+  it('表头 + 行 + 注脚；长单元格截断', () => {
+    const out = formatTable(['id', 'name'], [[1, 'x'.repeat(80)], [2, 'b']], '2 行');
+    const lines = out.split('\n');
+    expect(lines[0]).toContain('id');
+    expect(lines[1]).toContain('---');
+    expect(out).not.toContain('x'.repeat(60)); // 48 字符截断
+    expect(out.endsWith('2 行')).toBe(true);
+  });
+  it('空结果集容忍', () => {
+    expect(formatTable(['a'], [], null)).toContain('a');
+  });
+});
+
+describe('createTools', () => {
+  function mk() {
+    const callService = vi.fn(async (method) => {
+      if (method === 'query') return { columns: ['a'], rows: [[1], [2]], total: 2, truncated: false };
+      if (method === 'write') return { requestId: 'rq-1', status: 'pending' };
+      if (method === 'writeStatus') return { status: 'executed', affectedRows: 3, opClass: 'DML' };
+      if (method === 'listConnections') return { connections: [{ name: 'conn1', dialect: 'mysql' }] };
+      return { schemas: ['public'] };
+    });
+    const tools = createTools({ callService, logger: { info: () => {}, warn: () => {} } });
+    // sessionId 取 roomId（human_requests.session_id 外键 = sessions.id = 房间 ID；
+    // streamSessionId 是流 ID，非 sessions 行——写批准面板按房间挂载）
+    const toolCtx = { roomId: 'room-1', streamSessionId: 'stream-x', taskId: 'task-y' };
+    return { tools, callService, toolCtx };
+  }
+
+  it('11 个工具定义 + 短名合法（宿主 SHORT_NAME_RE）+ 宿主契约字段 inputSchema', () => {
+    const { tools } = mk();
+    const defs = tools.getDefs();
+    expect(defs).toHaveLength(11);
+    for (const d of defs) {
+      expect(d.name).toMatch(/^[a-z][a-z0-9_]*$/);
+      // 宿主 LLMToolDef 契约：inputSchema（非 OpenAI 风格 parameters）——
+      // 用错字段名会让 token 估算层拿到 undefined（验收 P0 实证）
+      expect(d.inputSchema).toEqual(expect.objectContaining({ type: 'object' }));
+      expect(d.inputSchema.properties).toBeDefined();
+      expect(d.inputSchema.required).toBeInstanceOf(Array);
+    }
+    expect(defs.map((d) => d.name)).toEqual(expect.arrayContaining(['query', 'write', 'write_status']));
+  });
+
+  it('query：callService 注入 sessionId/taskId（Review Focus #4）+ 表格渲染', async () => {
+    const { tools, callService, toolCtx } = mk();
+    const out = await tools.execute('query', { sql: 'SELECT 1' }, toolCtx);
+    expect(callService).toHaveBeenCalledWith('query',
+      expect.objectContaining({ sql: 'SELECT 1', sessionId: 'room-1', taskId: 'task-y' }),
+      { timeoutMs: 60000 });
+    expect(out).toContain('a');
+    expect(out).toContain('1');
+  });
+
+  it('write：渲染 pending 指引（不谎称已执行）', async () => {
+    const { tools, toolCtx } = mk();
+    const out = await tools.execute('write', { connection: 'c', sql: 'UPDATE t SET a=1' }, toolCtx);
+    expect(out).toContain('rq-1');
+    expect(out).toContain('批准');
+  });
+
+  it('write_status：executed 渲染影响行数；DDL 0 行/ DML 0 行分语义文案；未知工具拒绝', async () => {
+    const { tools, toolCtx } = mk();
+    const out = await tools.execute('write_status', { requestId: 'r' }, toolCtx);
+    expect(out).toContain('3');
+    await expect(tools.execute('bogus', {}, toolCtx)).rejects.toThrow(/未知工具/);
+  });
+});
+
+// 文案语义修复（2026-11-18 用户实测）：DDL affectedRows=0 被 agent 误读为失败
+// 反复补发——按 opClass 区分「结构变更无行影响」与「DML 无匹配行」。
+describe('write_status 文案语义', () => {
+  const mkStatus = (res) => {
+    const callService = vi.fn(async () => res);
+    return createTools({ callService, logger: { info: () => {}, warn: () => {} } });
+  };
+  it('DDL 0 行 → 「结构变更成功（不产生行影响）」', async () => {
+    const t = mkStatus({ status: 'executed', affectedRows: 0, opClass: 'DDL' });
+    const out = await t.execute('write_status', { requestId: 'r' }, { roomId: 'x', taskId: null });
+    expect(out).toContain('结构变更不产生行影响');
+    expect(out).not.toMatch(/影响行数: 0/);
+  });
+  it('DML 0 行 → 提示无匹配行（可能目标已满足）', async () => {
+    const t = mkStatus({ status: 'executed', affectedRows: 0, opClass: 'DML' });
+    const out = await t.execute('write_status', { requestId: 'r' }, { roomId: 'x', taskId: null });
+    expect(out).toContain('无匹配行');
+  });
+});

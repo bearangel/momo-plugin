@@ -1,0 +1,39 @@
+# db-pro 集成测试四库（OrbStack）。宿主端口避开常用口。
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: dbpro-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: dbpro123
+      MYSQL_DATABASE: dbpro
+    ports: ["13306:3306"]
+  pg:
+    image: postgres:15
+    container_name: dbpro-pg
+    environment:
+      POSTGRES_PASSWORD: dbpro123
+      POSTGRES_DB: dbpro
+    ports: ["15432:5432"]
+  oracle:
+    # Oracle 官方 registry（不走 Docker Hub）；ORACLE_PWD 统一 sys/system/pdbadmin 口令
+    #（gvenzl 的 APP_USER 便捷机制不适用本镜像——集成用 pdbadmin 普通用户登录 FREEPDB1）
+    image: container-registry.oracle.com/database/free:latest
+    container_name: dbpro-oracle
+    environment:
+      ORACLE_PWD: dbpro123
+    ports: ["11521:1521"]
+  dm:
+    # 达梦官方 docker tar 导入（download.dameng.com 直链，x86_64——OrbStack Rosetta 运行）
+    # 默认口令 SYSDBA/SYSDBA001（以容器日志为准）
+    image: dm8_single:dm8_20241022_rev244896_x86_rh6_64
+    platform: linux/amd64
+    container_name: dbpro-dm
+    privileged: true
+    environment:
+      PAGE_SIZE: "16"
+      LD_LIBRARY_PATH: /opt/dmdbms/bin
+      INSTANCE_NAME: dm8_test
+      CASE_SENSITIVE: "1"
+      UNICODE_FLAG: "1"
+      LENGTH_IN_CHAR: "1"
+    ports: ["15236:5236"]
