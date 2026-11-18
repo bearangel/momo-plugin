@@ -15,11 +15,12 @@ services:
       POSTGRES_DB: dbpro
     ports: ["15432:5432"]
   oracle:
-    image: gvenzl/oracle-free:23-slim
+    # Oracle 官方 registry（不走 Docker Hub）；ORACLE_PWD 统一 sys/system/pdbadmin 口令
+    #（gvenzl 的 APP_USER 便捷机制不适用本镜像——集成用 pdbadmin 普通用户登录 FREEPDB1）
+    image: container-registry.oracle.com/database/free:latest
     container_name: dbpro-oracle
     environment:
-      APP_USER: dbpro
-      APP_USER_PASSWORD: dbpro123
+      ORACLE_PWD: dbpro123
     ports: ["11521:1521"]
   dm:
     # 达梦官方 docker tar 导入（download.dameng.com 直链，x86_64——OrbStack Rosetta 运行）
