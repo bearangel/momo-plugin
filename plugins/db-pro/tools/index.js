@@ -1,7 +1,7 @@
 'use strict';
 // db-pro 工具面（spec §4.1，11 工具）：薄壳——定义 + callService 透传 + 结果渲染。
-// 行为边界写入工具描述（防 LLM 误用）；write 注入 sessionId/taskId
-//（toolCtx.streamSessionId——人工请求面板可见性的锚，spec §7-1）。
+// 行为边界写入工具描述（防 LLM 误用）；write 注入 sessionId=toolCtx.roomId /
+// taskId（人工请求按房间挂载——human_requests.session_id 外键 = sessions.id）。
 const { formatTable } = require('../engine/format');
 
 const CALL_TIMEOUT_MS = 60_000; // 桥上限（spec §2 事实 1）
@@ -92,6 +92,7 @@ const DEFS = [
       properties: {
         connection: { type: 'string', description: '连接名（省略用缺省连接）' },
         sql: { type: 'string', description: '只读 SQL 语句（单条）' },
+        max_rows: { type: 'number', description: '本次返回行数上限（省略用全局配置，默认 200）' },
       },
       required: ['sql'],
     },
@@ -171,7 +172,10 @@ function render(name, res) {
   if (name === 'list_connections') {
     return res.connections.length === 0
       ? '（未配置连接——请在 设置 → 插件 → db-pro 配置连接串）'
-      : res.connections.map((c) => `- ${c.name}（${c.dialect}）`).join('\n');
+      : res.connections.map((c) => {
+          if (c.ok === false) return `- ${c.name}（${c.dialect}，⚠ 配置失败：${c.reason}）`;
+          return `- ${c.name}（${c.dialect}）`;
+        }).join('\n');
   }
   if (name === 'get_ddl') return res.ddl;
   return JSON.stringify(res, null, 2);
@@ -194,9 +198,11 @@ function createTools(ctx) {
       if (!method) throw new Error(`未知工具: ${name}`);
       // sessionId 用 roomId：human_requests.session_id 外键指向 sessions.id（房间），
       // 人工请求面板也按房间挂载——streamSessionId 是流 ID 非 sessions 行（验收 P0 实证）
+      const mapped = { ...args };
+      if (mapped.max_rows !== undefined) mapped.maxRows = mapped.max_rows; // M-C：spec 命名 → service 契约
       const res = await ctx.callService(
         method,
-        { ...args, sessionId: toolCtx.roomId, taskId: toolCtx.taskId ?? null },
+        { ...mapped, sessionId: toolCtx.roomId, taskId: toolCtx.taskId ?? null },
         { timeoutMs: CALL_TIMEOUT_MS },
       );
       return render(name, res);

@@ -96,7 +96,7 @@ describe('write.status（两段式全转移）', () => {
   });
 
   it('重启恢复：write-log.jsonl 已记录的 requestId 不再执行（Review Focus #3）', async () => {    const h = mkHarness();
-    fs.appendFileSync(path.join(h.dataDir, 'write-log.jsonl'), JSON.stringify({ requestId: 'done-1', affectedRows: 7, at: 1 }) + '\n');
+    fs.appendFileSync(path.join(h.dataDir, 'write-log.jsonl'), JSON.stringify({ requestId: 'done-1', status: 'executed', affectedRows: 7, at: 1 }) + '\n');
     const state2 = stateMod.createWriteState({
       humanGate: () => h.humanGate, execSql: h.execSql, dataDir: h.dataDir, log: () => undefined,
     });

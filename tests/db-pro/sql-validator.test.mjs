@@ -16,6 +16,7 @@ describe('assertReadOnly 正例（必须放行）', () => {
     'SELECT /* 注释; 含分号 */ 1',
     'SELECT 1 -- 行注释 UPDATE',
     'SELECT "comment" FROM t',                    // 引号标识符走字面量剥离——全文检测后合法列名不受误杀
+    'EXPLAIN ANALYZE SELECT * FROM t',            // 合法只读计划（写词扫描扩 explain 后必须仍放行）
     "SELECT 'a;b' AS c, update_flag FROM t2",     // 反引号/字符串外的 update_前缀词无词边界命中
   ];
   for (const sql of ok) it(sql.slice(0, 40), () => expect(assertReadOnly(sql).ok).toBe(true));
@@ -32,6 +33,9 @@ describe('assertReadOnly 负例（必须拒绝且 reason 人话）', () => {
     ['SELECT 1;SELECT 2', '多语句'],
     ['WITH c AS (SELECT 1) INSERT INTO t SELECT * FROM c', '写关键词'],
     ['WITH del AS (DELETE FROM orders RETURNING *) SELECT * FROM del', 'PG 数据修改 CTE（终审 C1）'],
+    ['EXPLAIN ANALYZE DELETE FROM t', 'EXPLAIN ANALYZE 执行写（复审 C-3）'],
+    ['EXPLAIN (ANALYZE, BUFFERS) DELETE FROM t', 'EXPLAIN 选项形态执行写（复审 C-3）'],
+    ["SELECT 'x' --1 INTO OUTFILE '/tmp/p'", 'MySQL --非空白假注释藏 INTO（复审 I-5）'],
     ['SELECT id, name INTO temp_copy FROM users', 'SELECT INTO 建表（终审 C1）'],
     ["SELECT 1 INTO OUTFILE '/tmp/x'", 'OUTFILE'],
     ['TRUNCATE TABLE t', '首词'],

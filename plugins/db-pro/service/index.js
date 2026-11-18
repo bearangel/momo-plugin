@@ -26,6 +26,7 @@ function createService(ctx) {
   let backoffIdx = -1; // -1 = 未在退避
   let restartTimer = null;
   let lastConnections = [];
+  let lastUnavailable = new Map(); // I-6：坏槽名 → 引擎侧失败原因（listConnections 回吐）
   const pending = new Map(); // rpc id → {resolve, reject, timer}
 
   const writeState = createWriteState({
@@ -40,9 +41,17 @@ function createService(ctx) {
 
   // ── 引擎进程管理 ─────────────────────────────────────────────
   function spawnEngine() {
+    // I-8（复审）：bootEngine ping 超时路径的旧「假死」引擎进程无人回收——
+    // 重 spawn 前先终结仍存活的旧 child（stdio 管道随进程释放）
+    if (child && !child.killed) {
+      try { child.kill('SIGTERM'); } catch { /* 已死 */ }
+    }
     const command = 'node'; // L2：PATH 系统 node（Spike #0 定论；dev 机 24 线）
     const args = ['--openssl-legacy-provider', engineEntry]; // dmdb 握手硬需求（spec §1.3）
     child = spawn(command, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    // I-7（复审）：引擎 crash-exit 后 killed 仍为 false，'exit' 处理前的窗口内
+    // rpc 写管道触发 EPIPE——stdin 无 error 监听会变主进程未捕获异常
+    child.stdin.on('error', () => undefined);
     let buf = '';
     child.stdout.setEncoding('utf-8');
     child.stdout.on('data', (chunk) => {
@@ -125,7 +134,14 @@ function createService(ctx) {
         ));
       }, timeoutMs);
       pending.set(id, { resolve, reject, timer });
-      child.stdin.write(JSON.stringify({ id, method, params }) + '\n');
+      try {
+        child.stdin.write(JSON.stringify({ id, method, params }) + '\n');
+      } catch (err) {
+        // I-7：进程刚死管道破裂的同步抛错面——转 reject 不上抛主进程
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(new Error(`db-pro 引擎管道已断（${err.message}）——请重试`));
+      }
     });
   }
 
@@ -135,7 +151,10 @@ function createService(ctx) {
     if (diffConnections(lastConnections, conns)) {
       // 先 configure 成功再提交 lastConnections（终审 I1）：失败时 diff 仍判变，
       // 下次调用即重试——不会把失败配置楔死到重启
-      await rpc('configure', { connections: conns }, ENGINE_BOOT_TIMEOUT_MS);
+      const r = await rpc('configure', { connections: conns }, ENGINE_BOOT_TIMEOUT_MS);
+      // I-6（复审）：回吐坏槽 unavailable——listConnections 按槽带 ok/reason，
+      // 不再单槽炸整表（dialectOf 同步加守卫）
+      lastUnavailable = new Map((r.unavailable ?? []).map((u) => [u.name, u.reason]));
       lastConnections = conns;
     }
   }
@@ -148,8 +167,13 @@ function createService(ctx) {
     return lastConnections[0]?.name ?? '';
   }
 
+  // I-6（复审）：URL 形态守卫——无 scheme 槽值（如裸 127.0.0.1）不炸整表
   function dialectOf(url) {
-    return new URL(url).protocol.replace(':', '');
+    try {
+      return new URL(url).protocol.replace(':', '');
+    } catch {
+      return 'unknown';
+    }
   }
 
   async function handle(method, params) {
@@ -157,7 +181,12 @@ function createService(ctx) {
     if (method === 'writeStatus') return writeState.status(params);
     if (method === 'listConnections') {
       if (child) await ensureConfig();
-      return { connections: lastConnections.map((c) => ({ name: c.name, dialect: dialectOf(c.url) })) };
+      return {
+        connections: lastConnections.map((c) => {
+          const reason = lastUnavailable.get(c.name);
+          return { name: c.name, dialect: dialectOf(c.url), ok: reason === undefined, ...(reason !== undefined ? { reason } : {}) };
+        }),
+      };
     }
     if (READ_METHODS.has(method)) {
       if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
@@ -165,7 +194,10 @@ function createService(ctx) {
       const p = { ...params };
       if (!p.connection) p.connection = defaultConnection();
       if (method === 'query') {
+        // M-A（复审）：rpc 超时随配置走（引擎侧超时 + 5s 余量，桥上限 60s 内）
         p.maxRows = p.maxRows ?? (Number(ctx.getConfig().readonly_max_rows) || 200);
+        const cfgTimeout = Number(ctx.getConfig().query_timeout_ms) || 30_000;
+        return await rpc(method, p, Math.min(cfgTimeout + 5_000, 55_000));
       }
       return await rpc(method, p);
     }

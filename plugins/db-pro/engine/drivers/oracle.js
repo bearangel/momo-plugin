@@ -143,6 +143,9 @@ async function createPool(connUrl, opts = {}) {
     async exec(sql) {
       return await withConn(async (conn) => {
         const res = await conn.execute(sql);
+        // C-4（复审）：thin 模式 DML 默认非自动提交——conn.close() 归池前回滚，
+        // 批准写会静默蒸发（write_status 谎报成功）。显式提交（DDL 隐式提交，commit 无害）
+        if ((res.rowsAffected ?? 0) > 0) await conn.commit();
         return { affectedRows: res.rowsAffected ?? 0 };
       });
     },

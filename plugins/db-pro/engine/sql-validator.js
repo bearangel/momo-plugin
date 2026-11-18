@@ -35,8 +35,17 @@ function stripLiteralsAndComments(sql) {
       out += ' ';
       continue;
     }
-    if (two === '--' || c === '#') {
-      while (i < n && sql[i] !== '\n') i += 1;
+    // 行注释仅认「-- + 空白/行尾」（MySQL 语法 -- 非空白是负负表达式而非注释——
+    // 复审 I-5：无条件剥到行尾会把 `--1 INTO OUTFILE` 藏进校验盲区）；
+    // `#` 不再剥离（仅 MySQL 方言是注释，非 MySQL 下属原文盲区——保守按普通字符）
+    if (two === '--') {
+      const after = sql[i + 2];
+      if (after === undefined || after === ' ' || after === '\t' || after === '\n' || after === '\r') {
+        while (i < n && sql[i] !== '\n') i += 1;
+        continue;
+      }
+      out += c;
+      i += 1;
       continue;
     }
     if (two === '/*') {
@@ -75,19 +84,34 @@ function assertReadOnly(sqlRaw) {
     return { ok: false, reason: '拒绝多语句（检测到分号）。请每次只执行一条语句。' };
   }
   if (DENY_CLAUSES.test(stripped)) {
-    return { ok: false, reason: '拒绝锁定/导出子句（FOR UPDATE / FOR SHARE / LOCK IN SHARE MODE / INTO OUTFILE）。' };
+    return { ok: false, reason: '拒绝锁定/重定向子句（FOR UPDATE / FOR SHARE / LOCK IN SHARE MODE / 任何 INTO——含 INTO OUTFILE 与 SELECT INTO）。' };
   }
   const skeleton = outerSkeleton(stripped);
   const firstWord = firstWordOf(skeleton);
   if (!READ_FIRST_WORDS.has(firstWord)) {
     return { ok: false, reason: `首词 "${firstWord || '(空)'}" 不在只读白名单（SELECT/SHOW/DESCRIBE/EXPLAIN/WITH）。写操作请使用 write 工具发起人工批准。` };
   }
+  // 写词全文检测覆盖 select/with（终审 C1）；explain 首词剥前缀后递归校验内层
+  // 语句（复审 C-3：`EXPLAIN ANALYZE <写语句>` 在 PG 真实执行——内层 DELETE/UPDATE
+  // 须拒；`ANALYZE` 本身是写词，不能简单并入全文扫描否则误杀合法 EXPLAIN ANALYZE
+  // SELECT；show/describe/desc 维持豁免——无写执行语义）
   if (firstWord === 'select' || firstWord === 'with') {
-    // 终审 C1：全文检测（stripped——字面量/注释已剥离）而非骨架——括号内
-    //（子查询/CTE 体）的写词不再被挖空放过；引号标识符经剥离不受误杀（R4 兜底）
+    // 全文检测（stripped——字面量/注释已剥离）而非骨架——括号内（子查询/CTE 体）
+    // 的写词不再被挖空放过；引号标识符经剥离不受误杀（R4 兜底）
     const m = stripped.match(WRITE_KEYWORDS);
     if (m) {
       return { ok: false, reason: `语句包含写关键词 "${m[0].toUpperCase()}"。写操作请使用 write 工具发起人工批准。` };
+    }
+  }
+  if (firstWord === 'explain') {
+    // C-3：剥前导 EXPLAIN [选项括号] [ANALYZE|VERBOSE]* 后递归校验内层语句
+    const inner = stripped
+      .replace(/^explain\s*/i, '')
+      .replace(/^(\([^)]*\)|analyze|verbose)\s*/gi, '')
+      .replace(/^(\([^)]*\)|analyze|verbose)\s*/gi, '');
+    const innerCheck = assertReadOnly(inner);
+    if (!innerCheck.ok) {
+      return { ok: false, reason: `EXPLAIN 内层语句被拒：${innerCheck.reason}` };
     }
   }
   return { ok: true };
