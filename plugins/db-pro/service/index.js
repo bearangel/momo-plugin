@@ -5,7 +5,7 @@
 //（Electron 内嵌 Node 无该开关——L1 实测 bad option）；分发兜底 L3 见 RESULT.md。
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connectionsFromConfig, diffConnections, sanitizeTimeoutMs } = require('./config-connections');
+const { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, validateWriteConnection } = require('./config-connections');
 const { createWriteState } = require('./write-state');
 const { isFatalSpawnError } = require('./spawn-diag');
 
@@ -184,7 +184,12 @@ function createService(ctx) {
   }
 
   async function handle(method, params) {
-    if (method === 'write') return writeState.request(params);
+    if (method === 'write') {
+      // 前置校验连接名（虚构名不建卡——批准流完整性，2026-11-18 stu 实证）
+      if (child) await ensureConfig();
+      validateWriteConnection(lastConnections, params.connection);
+      return writeState.request(params);
+    }
     if (method === 'writeStatus') return writeState.status(params);
     if (method === 'listConnections') {
       if (child) await ensureConfig();

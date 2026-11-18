@@ -50,3 +50,19 @@ describe('diffConnections', () => {
     expect(diffConnections([], A)).toBe(true);
   });
 });
+
+// write 前置连接名校验（2026-11-18 用户实测：agent 虚构连接名 stu——建卡获批后
+// 执行才炸「未配置的连接」，批准流被打穿）。契约：未知名 → 人话错误带可用清单。
+import { validateWriteConnection } from '../../plugins/db-pro/service/config-connections.js';
+describe('validateWriteConnection', () => {
+  const conns = [{ name: 'mysql', url: 'mysql://u:p@h/d', queryTimeoutMs: 30000 }];
+  it('已知名通过', () => {
+    expect(validateWriteConnection(conns, 'mysql')).toBeUndefined();
+  });
+  it('未知名 → 人话错误并列出可用连接', () => {
+    expect(() => validateWriteConnection(conns, 'stu')).toThrow(/未配置的连接 "stu".*可用连接: mysql/);
+  });
+  it('零连接时的清单为（无）并引导配置', () => {
+    expect(() => validateWriteConnection([], 'x')).toThrow(/可用连接: （无）/);
+  });
+});

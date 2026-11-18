@@ -39,4 +39,13 @@ function diffConnections(prev, next) {
   return false;
 }
 
-module.exports = { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, SLOT_COUNT };
+/** write 前置校验：连接名必须已配置——agent 可虚构名（stu 实证），不校验会
+ *  「建卡获批→执行才炸」，批准流被打穿。未知名抛人话错误并列可用清单 */
+function validateWriteConnection(conns, name) {
+  if (!conns.some((c) => c.name === name)) {
+    const list = conns.map((c) => c.name).join(', ') || '（无）';
+    throw new Error(`未配置的连接 "${String(name)}"——可用连接: ${list}（list_connections 可查；未配置请在 设置 → 插件 → db-pro 添加）`);
+  }
+}
+
+module.exports = { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, validateWriteConnection, SLOT_COUNT };
