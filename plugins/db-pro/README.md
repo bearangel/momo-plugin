@@ -22,6 +22,12 @@ agent 工具 plugin:db-pro/*（薄壳）
 
 引擎子进程必须带 `--openssl-legacy-provider` 启动（达梦 dmdb 握手依赖 legacy cipher；Electron 内嵌 Node 不支持该开关，故走系统 node——见 `spike/RESULT.md`）。
 
+## 已知边界（终审在案）
+
+- **达梦连接 `query_timeout_ms` 不生效**：dmdb 无池级/语句级超时注入点——查询时长仅受 service 桥 30s 上限约束（超时后引擎侧查询可能仍在跑占用连接）。后续版本在 dm 驱动层做超时取消。
+- **MySQL `LOAD_FILE()` 等服务端文件读取函数过只读校验**：读取范围受数据库账号 FILE 权限约束——连接凭据即信任边界，属接受的风险；不允许的账号自然被数据库拒绝。
+- **引擎依赖系统 node**：无 node 的机器上插件不可用（日志可见 spawn ENOENT 退避重试）；vendor node 兜底在分发阶段引入（spike RESULT.md L3）。
+
 ## 测试
 
 ```bash

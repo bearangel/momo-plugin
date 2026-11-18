@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process');
 const path = require('node:path');
 const { connectionsFromConfig, diffConnections } = require('./config-connections');
 const { createWriteState } = require('./write-state');
+const { isFatalSpawnError } = require('./spawn-diag');
 
 const ENGINE_BOOT_TIMEOUT_MS = 8_000;
 /** 退避序列（spec §8：1s / 5s / 30s 封顶；成功后归零） */
@@ -62,7 +63,23 @@ function createService(ctx) {
     });
     child.stderr.setEncoding('utf-8');
     child.stderr.on('data', (chunk) => ctx.logger.info(`db-pro 引擎 stderr: ${chunk.trim().slice(0, 400)}`));
-    child.on('error', (err) => onEngineExit(`spawn 失败: ${err.message}`));
+    child.on('error', (err) => {
+      // M3：node 缺失（ENOENT）一次性人话停机——环境缺陷重试不可治愈
+      if (isFatalSpawnError(err)) {
+        ctx.logger.error(
+          'db-pro 引擎无法启动：未找到 node 可执行文件（PATH 无 node）。插件不可用——请安装 Node.js 后在插件页重载。',
+        );
+        stopping = true;
+        child = null;
+        for (const [, p] of pending) {
+          clearTimeout(p.timer);
+          p.reject(new Error('db-pro 引擎不可用：本机未安装 Node.js'));
+        }
+        pending.clear();
+        return;
+      }
+      onEngineExit(`spawn 失败: ${err.message}`);
+    });
     child.on('exit', (code) => onEngineExit(`退出 code=${code}`));
   }
 
