@@ -5,7 +5,7 @@
 //（Electron 内嵌 Node 无该开关——L1 实测 bad option）；分发兜底 L3 见 RESULT.md。
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connectionsFromConfig, diffConnections } = require('./config-connections');
+const { connectionsFromConfig, diffConnections, sanitizeTimeoutMs } = require('./config-connections');
 const { createWriteState } = require('./write-state');
 const { isFatalSpawnError } = require('./spawn-diag');
 
@@ -176,6 +176,13 @@ function createService(ctx) {
     }
   }
 
+  // 行数上限净化：负数 slice 会从尾部截（同类 -40 隐患）——非有限/<=0 归 200，封顶 10000
+  function sanitizeMaxRows(raw) {
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n <= 0) return 200;
+    return Math.min(Math.floor(n), 10_000);
+  }
+
   async function handle(method, params) {
     if (method === 'write') return writeState.request(params);
     if (method === 'writeStatus') return writeState.status(params);
@@ -194,9 +201,10 @@ function createService(ctx) {
       const p = { ...params };
       if (!p.connection) p.connection = defaultConnection();
       if (method === 'query') {
-        // M-A（复审）：rpc 超时随配置走（引擎侧超时 + 5s 余量，桥上限 60s 内）
-        p.maxRows = p.maxRows ?? (Number(ctx.getConfig().readonly_max_rows) || 200);
-        const cfgTimeout = Number(ctx.getConfig().query_timeout_ms) || 30_000;
+        // M-A（复审）：rpc 超时随配置走（引擎侧超时 + 5s 余量，桥上限 60s 内）；
+        // 超时/行数均过净化（负值归缺省——-40 实证：负超时直传致全量瞬时超时）
+        p.maxRows = p.maxRows ?? sanitizeMaxRows(ctx.getConfig().readonly_max_rows);
+        const cfgTimeout = sanitizeTimeoutMs(ctx.getConfig().query_timeout_ms);
         return await rpc(method, p, Math.min(cfgTimeout + 5_000, 55_000));
       }
       return await rpc(method, p);
