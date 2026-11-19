@@ -6,11 +6,27 @@ agent 可查询 MySQL / PostgreSQL / Oracle（12c+ thin）/ 达梦 DM8：**只�
 
 momo-studio → 设置 → 插件 → 开发目录安装 → 选本目录。依赖：本目录内 `npm install`（Node 24）。
 
-## 配置（设置 → 插件 → db-pro）
+## 配置（插件「数据库」面板）
 
-- 槽位 `conn1`-`conn6`：URL（敏感，入 keytar）+ 可选名称。格式：
-  `mysql://user:pass@host:3306/db` · `postgres://user:pass@host:5432/db` · `oracle://user:pass@host:1521/服务名`（Oracle 11g 不支持） · `dm://user:pass@host:5236`
-- `default_connection` / `readonly_max_rows`（200）/ `query_timeout_ms`（30000）
+连接在插件自带面板管理（侧栏连接列表 + 右侧编辑）：名称、描述、连接 URL、逐连接权限。
+格式：`mysql://user:pass@host:3306/db` · `postgres://user:pass@host:5432/db` · `oracle://user:pass@host:1521/服务名`（Oracle 11g 不支持） · `dm://user:pass@host:5236`。
+URL 明文只入 keytar，面板与工具均不回显密码。旧版设置页 `conn1`–`conn6` 配置在首次启动时自动迁移（保等效全权限，旧密钥清除）。
+
+**权限位（8 位，配置态闸；人工批准照旧）**
+
+| 权限位 | 覆盖 |
+|---|---|
+| `query` | SELECT / SHOW / DESC / EXPLAIN / WITH（含结构读） |
+| `insert` / `update` / `delete` | DML 三项（MERGE 需三项齐） |
+| `ddl_table` | CREATE / DROP / ALTER / TRUNCATE TABLE |
+| `ddl_other` | VIEW / INDEX / SEQUENCE / TRIGGER |
+| `procedure` | CREATE / DROP / ALTER PROCEDURE / FUNCTION / PACKAGE + CALL |
+| `script` | 脚本执行通道 |
+
+预设档：只读 `{query}` · 读写 `{query,insert,update,delete}` · 全权（8 位） · 自定义。
+权限与人工批准双闸独立：缺位直接拒绝（配置态），位齐后写/脚本仍走人工批准（运行态）。
+
+**设置页（仅插件级参数）**：`readonly_max_rows`（200）/ `query_timeout_ms`（30000）/ `script_timeout_ms`（600000）
 
 ## 架构速览
 

@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>数据库连接</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg-canvas: 255 255 255; --surface-1: 249 249 250; --surface-2: 241 241 243;
+    --text-primary: 24 25 26; --text-secondary: 86 89 99; --text-tertiary: 100 103 114; --text-disabled: 194 196 202;
+    --border-subtle: 232 232 236; --border-strong: 212 213 218;
+    --accent-500: 94 106 210;
+    --status-success: 35 131 92; --status-warning: 183 121 31; --status-error: 211 63 73;
+    --status-success-tint: rgba(35,131,92,.12); --status-warning-tint: rgba(183,121,31,.12); --status-error-tint: rgba(211,63,73,.12);
+    --surface-active: rgba(94,106,210,.12);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg-canvas: 8 9 10; --surface-1: 16 17 19; --surface-2: 24 26 31;
+    --text-primary: 247 248 248; --text-secondary: 180 184 191; --text-tertiary: 127 130 139; --text-disabled: 95 98 112;
+    --border-subtle: 31 32 35; --border-strong: 46 48 54;
+    --accent-500: 94 106 210;
+    --status-success: 76 183 130; --status-warning: 242 201 76; --status-error: 235 87 87;
+    --status-success-tint: rgba(76,183,130,.16); --status-warning-tint: rgba(242,201,76,.16); --status-error-tint: rgba(235,87,87,.16);
+    --surface-active: rgba(94,106,210,.22);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font: 12.5px/1.55 Inter, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+    background: rgb(var(--bg-canvas)); color: rgb(var(--text-primary)); overflow: hidden;
+  }
+  .app { display: grid; grid-template-columns: 220px 1fr; height: 100vh; }
+  .side { border-right: 1px solid rgb(var(--border-subtle)); background: rgb(var(--surface-1)); display: flex; flex-direction: column; min-height: 0; }
+  .side-hd { padding: 12px 12px 8px; display: flex; align-items: center; gap: 6px; }
+  .side-hd h2 { font-size: 13px; font-weight: 600; flex: 1; }
+  .icon { width: 15px; height: 15px; stroke: currentColor; fill: none; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+  .icon.sm { width: 13px; height: 13px; }
+  .btn {
+    font: inherit; border: 1px solid rgb(var(--border-strong)); background: rgb(var(--surface-2));
+    color: rgb(var(--text-primary)); border-radius: 6px; padding: 4px 10px; cursor: pointer;
+    display: inline-flex; align-items: center; gap: 5px; height: 28px; white-space: nowrap;
+  }
+  .btn:hover { background: rgb(var(--surface-3, var(--surface-2))); }
+  .btn.pri { background: rgb(var(--accent-500)); border-color: rgb(var(--accent-500)); color: #fff; }
+  .btn.pri:hover { filter: brightness(1.06); }
+  .btn.ghost { border-color: transparent; background: transparent; color: rgb(var(--text-secondary)); }
+  .btn.sm { height: 24px; padding: 2px 8px; font-size: 11.5px; }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .side-list { padding: 2px 6px 10px; display: flex; flex-direction: column; gap: 2px; overflow: auto; min-height: 0; }
+  .conn { display: flex; align-items: center; gap: 7px; padding: 7px 8px; border-radius: 6px; cursor: pointer; color: rgb(var(--text-secondary)); }
+  .conn:hover { background: rgb(var(--surface-2)); }
+  .conn.on { background: rgb(var(--surface-active)); color: rgb(var(--text-primary)); }
+  .conn .nm { flex: 1; font-size: 12.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; border: 1px solid transparent; white-space: nowrap; }
+  .badge.ro { background: rgb(var(--surface-2)); color: rgb(var(--text-secondary)); border-color: rgb(var(--border-subtle)); }
+  .badge.rw { background: var(--status-success-tint); color: rgb(var(--status-success)); }
+  .badge.full { background: var(--status-warning-tint); color: rgb(var(--status-warning)); }
+  .badge.cust { background: rgb(var(--surface-2)); color: rgb(var(--text-secondary)); border-color: rgb(var(--border-subtle)); }
+  .star { color: rgb(var(--text-disabled)); cursor: pointer; }
+  .star.on { color: rgb(var(--status-warning)); }
+  .side-ft { margin-top: auto; padding: 9px 12px; border-top: 1px solid rgb(var(--border-subtle)); font-size: 10.5px; color: rgb(var(--text-tertiary)); }
+  .empty-side { padding: 26px 14px; text-align: center; color: rgb(var(--text-tertiary)); font-size: 11.5px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
+  .editor { padding: 16px 20px 12px; display: flex; flex-direction: column; gap: 13px; overflow: auto; min-height: 0; }
+  .ed-hd { display: flex; align-items: center; gap: 8px; }
+  .ed-hd h3 { font-size: 13px; font-weight: 600; flex: 1; }
+  .lbl { display: block; font-size: 11px; color: rgb(var(--text-secondary)); margin-bottom: 4px; }
+  .inp {
+    width: 100%; height: 32px; font: inherit; padding: 0 10px; border-radius: 6px;
+    border: 1px solid rgb(var(--border-strong)); background: rgb(var(--bg-canvas)); color: rgb(var(--text-primary));
+  }
+  .inp:focus { outline: none; border-color: rgb(var(--accent-500)); }
+  .inp.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .inp.ph { color: rgb(var(--text-tertiary)); }
+  .inp[readonly] { cursor: pointer; }
+  .hint { font-size: 10.5px; color: rgb(var(--text-tertiary)); margin-top: 4px; }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .fieldset { border: 1px solid rgb(var(--border-subtle)); border-radius: 8px; padding: 10px 12px; }
+  .fieldset legend { font-size: 11px; color: rgb(var(--text-secondary)); padding: 0 4px; }
+  .presets { display: flex; gap: 14px; flex-wrap: wrap; padding-top: 2px; }
+  .preset { display: flex; align-items: center; gap: 5px; font-size: 12px; color: rgb(var(--text-secondary)); cursor: pointer; }
+  .preset input { accent-color: rgb(var(--accent-500)); }
+  .perm-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 14px; margin-top: 9px; }
+  .perm { display: flex; align-items: flex-start; gap: 6px; font-size: 11.5px; color: rgb(var(--text-secondary)); cursor: pointer; }
+  .perm input { margin-top: 2px; accent-color: rgb(var(--accent-500)); }
+  .perm b { font-weight: 600; color: rgb(var(--text-primary)); }
+  .perm .k { font-family: ui-monospace, Menlo, monospace; font-size: 10.5px; color: rgb(var(--text-tertiary)); }
+  .test-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .ok { color: rgb(var(--status-success)); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+  .bad { color: rgb(var(--status-error)); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
+  .ed-ft { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 10px; border-top: 1px solid rgb(var(--border-subtle)); }
+  .danger { color: rgb(var(--status-error)); }
+  .spacer { flex: 1; }
+  .empty-main { flex: 1; display: flex; flex-direction: column; gap: 6px; align-items: center; justify-content: center; color: rgb(var(--text-tertiary)); font-size: 12px; }
+  .empty-main .big { width: 26px; height: 26px; color: rgb(var(--text-disabled)); }
+  .banner { border-radius: 6px; padding: 6px 9px; font-size: 11.5px; background: var(--status-error-tint); color: rgb(var(--status-error)); }
+  .confirm-bar { display: none; align-items: center; gap: 8px; padding: 8px 20px; border-top: 1px solid rgb(var(--border-subtle)); background: rgb(var(--surface-1)); font-size: 11.5px; }
+  .confirm-bar .msg { flex: 1; color: rgb(var(--text-secondary)); }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="side">
+    <div class="side-hd">
+      <svg class="icon" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/><path d="M3 12c0 1.66 4 3 9 3s9-1.34 9-3"/></svg>
+      <h2>数据库</h2>
+      <button class="btn sm pri" id="btn-new"><svg class="icon sm" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>新增</button>
+    </div>
+    <div class="side-list" id="list"></div>
+    <div class="side-ft">连接为全局配置，所有工作空间共享</div>
+  </div>
+  <div class="editor" id="editor"></div>
+</div>
+<div class="confirm-bar" id="confirm-bar">
+  <span class="msg"></span>
+  <button class="btn sm" id="confirm-ok">确认</button>
+  <button class="btn sm ghost" id="confirm-cancel">取消</button>
+</div>
+
+<script>
+  // PanelChannel 胶水（email/codegraph 同款协议）：postMessage '*' + rpc:result + ready 握手
+  var seq = 0, pending = {};
+  function send(type, extra) {
+    var id = ++seq;
+    parent.postMessage(Object.assign({ type: type, id: id }, extra || {}), '*');
+    return new Promise(function (resolve, reject) {
+      pending[id] = { resolve: resolve, reject: reject };
+      setTimeout(function () { if (pending[id]) { pending[id].reject(new Error('rpc 超时')); delete pending[id]; } }, 60000);
+    });
+  }
+  window.addEventListener('message', function (ev) {
+    var m = ev.data;
+    if (!m || m.type !== 'rpc:result' || !pending[m.id]) return;
+    if (m.error !== undefined) pending[m.id].reject(new Error(String(m.error)));
+    else pending[m.id].resolve(m.result);
+    delete pending[m.id];
+  });
+  function call(method, params) { return send('plugin:callService', { method: method, params: params || {} }); }
+
+  var BITS = ['query', 'insert', 'update', 'delete', 'ddl_table', 'ddl_other', 'procedure', 'script'];
+  var PRESETS = {
+    read: ['query'],
+    readwrite: ['query', 'insert', 'update', 'delete'],
+    full: BITS.slice(),
+  };
+  var PERM_LABELS = {
+    query: ['查询', 'query'],
+    insert: ['插入', 'insert'],
+    update: ['更新', 'update'],
+    delete: ['删除', 'delete'],
+    ddl_table: ['表结构 DDL', 'ddl_table'],
+    ddl_other: ['视图/索引/序列', 'ddl_other'],
+    procedure: ['存储过程 / CALL', 'procedure'],
+    script: ['脚本执行', 'script'],
+  };
+  var S = { conns: [], selId: null, mode: 'view', form: null, test: null, err: '', busy: false };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  function attrEsc(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+  function sameSet(a, b) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    var sa = a.slice().sort().join(','), sb = b.slice().sort().join(',');
+    return sa === sb;
+  }
+  function presetOf(perms) {
+    if (sameSet(perms, PRESETS.read)) return 'read';
+    if (sameSet(perms, PRESETS.readwrite)) return 'readwrite';
+    if (sameSet(perms, PRESETS.full)) return 'full';
+    return 'custom';
+  }
+  function badgeOf(perms) {
+    var p = presetOf(perms);
+    if (p === 'read') return ['ro', '只读'];
+    if (p === 'readwrite') return ['rw', '读写'];
+    if (p === 'full') return ['full', '全权'];
+    return ['cust', '自定义'];
+  }
+
+  function applyTheme(res) {
+    if (!res || !res.tokens) return;
+    var map = {
+      'bg-canvas': '--bg-canvas', 'surface-1': '--surface-1', 'surface-2': '--surface-2',
+      'text-primary': '--text-primary', 'text-secondary': '--text-secondary', 'text-tertiary': '--text-tertiary',
+      'border-subtle': '--border-subtle', 'border-strong': '--border-strong', 'accent-500': '--accent-500',
+    };
+    var st = document.documentElement.style, dark = false;
+    for (var k in map) {
+      var v = res.tokens['--' + k];
+      if (v === undefined) continue;
+      st.setProperty(map[k], v);
+      if (k === 'bg-canvas' && /^\s*(\d+\s+){2}\d+/.test(String(v))) {
+        var n = String(v).trim().split(/\s+/).map(Number);
+        dark = (n[0] + n[1] + n[2]) < 384;
+      }
+    }
+    document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light');
+  }
+
+  function findConn(id) { return S.conns.filter(function (c) { return c.id === id; })[0] || null; }
+
+  function renderList() {
+    var box = $('list');
+    if (S.conns.length === 0) {
+      box.innerHTML = '<div class="empty-side">' +
+        '<svg class="icon" style="width:22px;height:22px;color:rgb(var(--text-disabled))" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>' +
+        '尚未添加连接</div>';
+      return;
+    }
+    var h = '';
+    S.conns.forEach(function (c) {
+      var b = badgeOf(c.permissions);
+      h += '<div class="conn' + (c.id === S.selId && S.mode === 'view' ? ' on' : '') + '" data-id="' + attrEsc(c.id) + '">' +
+        '<svg class="icon sm" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>' +
+        '<span class="nm">' + esc(c.name) + '</span>' +
+        '<span class="badge ' + b[0] + '">' + esc(b[1]) + '</span>' +
+        (c.isDefault ? '<svg class="icon sm star on" viewBox="0 0 24 24"><path d="M12 3l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3-5.8 3 1.1-6.5L2.6 9.8l6.5-.9z"/></svg>' : '') +
+        '</div>';
+    });
+    box.innerHTML = h;
+  }
+
+  function permGrid(checked) {
+    var h = '<div class="perm-grid">';
+    BITS.forEach(function (b) {
+      var lbl = PERM_LABELS[b];
+      h += '<label class="perm"><input type="checkbox" data-bit="' + b + '"' + (checked.indexOf(b) >= 0 ? ' checked' : '') + '>' +
+        '<span><b>' + esc(lbl[0]) + '</b> <span class="k">' + b + '</span></span></label>';
+    });
+    return h + '</div>';
+  }
+
+  function renderEditor() {
+    var box = $('editor');
+    if (S.mode === 'empty') {
+      box.innerHTML = '<div class="empty-main">' +
+        '<svg class="icon big" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/></svg>' +
+        '选择左侧连接，或新建一个</div>';
+      return;
+    }
+    var isNew = S.mode === 'create';
+    var f = S.form;
+    var b = badgeOf(f.permissions);
+    var preset = presetOf(f.permissions);
+    var urlReadonly = !isNew && f.hasUrl && !f.urlDirty;
+    var dot = f.hasUrl ? '已配置 · 点击更换' : 'mysql://user:pass@host:3306/db';
+    var h = '';
+    h += '<div class="ed-hd">' +
+      '<h3>' + esc(isNew ? '新建连接' : f.name) + '</h3>' +
+      '<span class="badge ' + b[0] + '">' + esc(b[1]) + '</span>' +
+      (!isNew ? '<svg class="icon sm star' + (f.isDefault ? ' on' : '') + '" id="btn-star" title="设为缺省连接" viewBox="0 0 24 24"><path d="M12 3l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3-5.8 3 1.1-6.5L2.6 9.8l6.5-.9z"/></svg>' : '') +
+      '</div>';
+    if (S.err) h += '<div class="banner">' + esc(S.err) + '</div>';
+    h += '<div class="row2">' +
+      '<div><label class="lbl">名称</label><input class="inp" id="f-name" value="' + attrEsc(f.name) + '" placeholder="如 mysql_dev"></div>' +
+      '<div><label class="lbl">描述</label><input class="inp" id="f-desc" value="' + attrEsc(f.description) + '" placeholder="可选"></div>' +
+      '</div>';
+    h += '<div><label class="lbl">连接 URL</label>' +
+      (urlReadonly
+        ? '<input class="inp mono ph" id="f-url" readonly value="已配置 · 点击更换">'
+        : '<input class="inp mono" id="f-url" value="' + attrEsc(f.url) + '" placeholder="' + attrEsc(dot) + '">') +
+      '<div class="hint">mysql:// postgres:// oracle:// dm:// · 密码保存后不回显</div></div>';
+    h += '<fieldset class="fieldset"><legend>权限</legend><div class="presets">' +
+      '<label class="preset"><input type="radio" name="preset" value="read"' + (preset === 'read' ? ' checked' : '') + '>只读</label>' +
+      '<label class="preset"><input type="radio" name="preset" value="readwrite"' + (preset === 'readwrite' ? ' checked' : '') + '>读写</label>' +
+      '<label class="preset"><input type="radio" name="preset" value="full"' + (preset === 'full' ? ' checked' : '') + '>全权</label>' +
+      '<label class="preset"><input type="radio" name="preset" value="custom"' + (preset === 'custom' ? ' checked' : '') + '>自定义</label>' +
+      '</div>' + permGrid(f.permissions) + '</fieldset>';
+    h += '<div class="test-row"><button class="btn" id="btn-test">' +
+      '<svg class="icon sm" viewBox="0 0 24 24"><path d="M12 2v6"/><path d="M6 9h12l-2 12H8z"/></svg>测试连接</button>' +
+      (S.test === 'ok' ? '<span class="ok">连接成功</span>' : '') +
+      (S.test && S.test !== 'ok' ? '<span class="bad">' + esc(S.test) + '</span>' : '') +
+      '</div>';
+    h += '<div class="ed-ft">' +
+      '<button class="btn pri" id="btn-save"' + (S.busy ? ' disabled' : '') + '>保存</button>' +
+      '<button class="btn" id="btn-cancel">取消</button>' +
+      '<span class="spacer"></span>' +
+      (!isNew ? '<button class="btn ghost danger" id="btn-del">删除连接</button>' : '') +
+      '</div>';
+    box.innerHTML = h;
+    bindEditor();
+  }
+
+  function bindEditor() {
+    var star = $('btn-star');
+    if (star) star.onclick = function () { return withBusy(function () { return call('connectionsSetDefault', { id: S.form.id }); }); };
+    var url = $('f-url');
+    if (url && url.readOnly) url.onclick = function () { S.form.urlDirty = true; S.form.url = ''; renderEditor(); var el = $('f-url'); if (el) el.focus(); };
+    var presets = document.querySelectorAll('input[name="preset"]');
+    Array.prototype.forEach.call(presets, function (r) {
+      r.onchange = function () {
+        if (r.value === 'custom') return;
+        S.form.permissions = PRESETS[r.value].slice();
+        renderEditor();
+      };
+    });
+    var bits = document.querySelectorAll('input[data-bit]');
+    Array.prototype.forEach.call(bits, function (c) {
+      c.onchange = function () {
+        var next = [];
+        Array.prototype.forEach.call(document.querySelectorAll('input[data-bit]'), function (x) {
+          if (x.checked) next.push(x.getAttribute('data-bit'));
+        });
+        S.form.permissions = BITS.filter(function (b) { return next.indexOf(b) >= 0; });
+        renderEditor();
+      };
+    });
+    $('btn-test').onclick = onTest;
+    $('btn-save').onclick = onSave;
+    $('btn-cancel').onclick = onCancel;
+    var del = $('btn-del');
+    if (del) del.onclick = onDelete;
+  }
+
+  function readForm() {
+    if ($('f-name')) S.form.name = $('f-name').value;
+    if ($('f-desc')) S.form.description = $('f-desc').value;
+    var url = $('f-url');
+    if (url && !url.readOnly) S.form.url = url.value;
+    return S.form;
+  }
+
+  function withBusy(fn) {
+    S.err = '';
+    S.busy = true;
+    renderEditor();
+    return Promise.resolve()
+      .then(fn)
+      .then(function (res) {
+        S.busy = false;
+        if (res && res.connections) S.conns = res.connections;
+        return res;
+      })
+      .catch(function (err) {
+        S.busy = false;
+        S.err = err && err.message ? err.message : String(err);
+        throw err;
+      });
+  }
+
+  function onTest() {
+    var f = readForm();
+    S.test = null;
+    renderEditor();
+    S.busy = true;
+    renderEditor();
+    var payload = (!f.hasUrl || f.urlDirty) && f.url ? { url: f.url } : { name: f.name };
+    call('connectionsTest', payload)
+      .then(function () { S.test = 'ok'; })
+      .catch(function (err) { S.test = '连接失败：' + (err && err.message ? err.message : String(err)); })
+      .then(function () { S.busy = false; renderEditor(); });
+  }
+
+  function onSave() {
+    var f = readForm();
+    if (!f.name || !f.name.trim()) { S.err = '连接名称不能为空'; renderEditor(); return; }
+    if (S.mode === 'create' && (!f.url || !f.url.trim())) { S.err = '连接 URL 不能为空'; renderEditor(); return; }
+    var payload;
+    if (S.mode === 'create') {
+      payload = { name: f.name.trim(), description: f.description || '', url: f.url.trim(), permissions: f.permissions };
+    } else {
+      payload = { id: f.id, patch: { name: f.name.trim(), description: f.description || '', permissions: f.permissions } };
+      if (f.urlDirty && f.url && f.url.trim()) payload.patch.url = f.url.trim();
+    }
+    var method = S.mode === 'create' ? 'connectionsCreate' : 'connectionsUpdate';
+    withBusy(function () { return call(method, payload); })
+      .then(function (res) {
+        var list = res && res.connections ? res.connections : S.conns;
+        S.conns = list;
+        var pick = S.mode === 'create' ? list.filter(function (c) { return c.name === f.name.trim(); })[0] : findConn(payload.id);
+        enterView(pick ? pick.id : (list[0] && list[0].id) || null);
+      })
+      .catch(function () { renderEditor(); });
+  }
+
+  function onCancel() {
+    S.test = null;
+    S.err = '';
+    if (S.mode === 'create') enterEmpty();
+    else if (S.form && S.form.id) enterView(S.form.id);
+  }
+
+  var confirmResolve = null;
+  function inlineConfirm(message) {
+    var bar = $('confirm-bar');
+    bar.querySelector('.msg').textContent = message;
+    bar.style.display = 'flex';
+    return new Promise(function (resolve) {
+      confirmResolve = resolve;
+      $('confirm-ok').onclick = function () { bar.style.display = 'none'; confirmResolve = null; resolve(true); };
+      $('confirm-cancel').onclick = function () { bar.style.display = 'none'; confirmResolve = null; resolve(false); };
+    });
+  }
+
+  function onDelete() {
+    var f = S.form;
+    inlineConfirm('删除连接「' + f.name + '」？该连接的密钥将一并清除。').then(function (yes) {
+      if (!yes) return;
+      withBusy(function () { return call('connectionsRemove', { id: f.id }); })
+        .then(function (res) {
+          S.conns = res && res.connections ? res.connections : S.conns.filter(function (c) { return c.id !== f.id; });
+          if (S.conns.length > 0) enterView(S.conns[0].id);
+          else enterEmpty();
+        })
+        .catch(function () { renderEditor(); });
+    });
+  }
+
+  function enterView(id) {
+    var c = findConn(id);
+    if (!c) { enterEmpty(); return; }
+    S.mode = 'view';
+    S.selId = c.id;
+    S.test = null;
+    S.err = '';
+    S.form = { id: c.id, name: c.name, description: c.description || '', permissions: (c.permissions || []).slice(), hasUrl: !!c.hasUrl, url: '', urlDirty: false, isDefault: !!c.isDefault };
+    renderList();
+    renderEditor();
+  }
+
+  function enterEmpty() {
+    S.mode = 'empty';
+    S.selId = null;
+    S.form = null;
+    S.test = null;
+    S.err = '';
+    renderList();
+    renderEditor();
+  }
+
+  function enterCreate() {
+    S.mode = 'create';
+    S.selId = null;
+    S.test = null;
+    S.err = '';
+    S.form = { name: '', description: '', permissions: PRESETS.read.slice(), hasUrl: false, url: '', urlDirty: true, isDefault: false };
+    renderList();
+    renderEditor();
+  }
+
+  $('list').addEventListener('click', function (ev) {
+    var el = ev.target;
+    while (el && el !== this && !el.getAttribute('data-id')) el = el.parentElement;
+    if (el && el !== this) {
+      if (S.mode === 'create') { S.mode = 'view'; }
+      enterView(el.getAttribute('data-id'));
+    }
+  });
+  $('btn-new').onclick = enterCreate;
+
+  function boot() {
+    call('connectionsList', {})
+      .then(function (res) {
+        S.conns = (res && res.connections) || [];
+        if (S.conns.length > 0) enterView(S.conns[0].id);
+        else enterEmpty();
+      })
+      .catch(function (err) {
+        S.conns = [];
+        S.mode = 'empty';
+        S.form = null;
+        renderList();
+        $('editor').innerHTML = '<div class="banner">连接列表加载失败：' + esc(err && err.message ? err.message : String(err)) + '</div>';
+      });
+  }
+
+  send('ready')
+    .then(function (res) { applyTheme(res && res.result ? res.result : res); boot(); })
+    .catch(function () { boot(); });
+</script>
+</body>
+</html>

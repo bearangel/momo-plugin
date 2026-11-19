@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "MySQL / PostgreSQL / Oracle / 达梦 查询：只读直查 + 写操作人工批准（多连接）",
   "minAppVersion": "2.1.0",
-  "components": { "tools": "./tools", "service": "./service", "skills": "./skills" },
+  "components": { "tools": "./tools", "service": "./service", "skills": "./skills", "panel": "./panel" },
   "config": {
     "type": "object",
     "properties": {
