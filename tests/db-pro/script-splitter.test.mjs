@@ -3,6 +3,7 @@
 import { describe, it, expect } from 'vitest';
 import m from '../../plugins/db-pro/engine/script-splitter.js';
 const { splitStatements, SplitterError } = m;
+import { classifyStatement, summarize, extractScriptNo } from '../../plugins/db-pro/engine/script-splitter.js';
 
 describe('splitStatements · 基础切分', () => {
   it('两条语句按分号切分，行号/首词正确', () => {
@@ -136,5 +137,49 @@ describe('splitStatements · Oracle/DM profile', () => {
   it('控制流指令拒绝（EXIT / WHENEVER / @include）', () => {
     expect(() => splitStatements('EXIT\n', 'oracle')).toThrow(/不支持.*EXIT|控制流/);
     expect(() => splitStatements('@a.sql\n', 'dm')).toThrow(/不支持/);
+  });
+});
+
+describe('classifyStatement / summarize / extractScriptNo', () => {
+  it.each([
+    ['SELECT * FROM t', 'read'],
+    ['INSERT INTO t VALUES (1)', 'insert'],
+    ['UPDATE t SET a = 1', 'update'],
+    ['DELETE FROM t', 'delete'],
+    ['MERGE INTO t USING s ON (1=1)', 'merge'],
+    ['TRUNCATE TABLE t', 'ddl_table'],
+    ['CREATE TABLE t (id INT)', 'ddl_table'],
+    ['DROP TABLE IF EXISTS t', 'ddl_table'],
+    ['ALTER TABLE t ADD c INT', 'ddl_table'],
+    ['CREATE INDEX ix ON t(a)', 'ddl_other'],
+    ['CREATE OR REPLACE VIEW v AS SELECT 1', 'ddl_other'],
+    ['CREATE PROCEDURE p() BEGIN END', 'procedure'],
+    ['CALL p()', 'procedure'],
+    ['SET @x = 1', 'session'],
+    ['START TRANSACTION', 'txn'],
+    ['COMMIT', 'txn'],
+    ['BEGIN DELETE FROM t; END', 'block'],
+    ['GRANT SELECT ON t TO u', 'priv'],
+  ])('%s → %s', (sql, cls) => {
+    expect(classifyStatement(sql).cls).toBe(cls);
+  });
+
+  it('表推断去引号/去重', () => {
+    const r = classifyStatement('INSERT INTO `db`.`t` SELECT * FROM t');
+    expect(r.tables).toContain('t');
+  });
+
+  it('summarize 计数与表并集', () => {
+    const r = splitStatements('INSERT INTO a VALUES (1);\nUPDATE b SET x=1;\nSELECT 1;', 'mysql');
+    const s = summarize(r.statements);
+    expect(s.statementCount).toBe(3);
+    expect(s.counts).toEqual({ insert: 1, update: 1, read: 1 });
+    expect(s.tables).toEqual(expect.arrayContaining(['a', 'b']));
+  });
+
+  it('extractScriptNo 从 @__script_no 与注释兜底', () => {
+    expect(extractScriptNo("SET @__script_no = 'S00971511';")).toBe('S00971511');
+    expect(extractScriptNo('-- SCRIPT_NO: S00957558')).toBe('S00957558');
+    expect(extractScriptNo('SELECT 1')).toBeNull();
   });
 });

@@ -25,6 +25,50 @@ function firstKeyword(text) {
   return m ? m[0].toLowerCase() : '';
 }
 
+const TABLE_PATTERNS = [
+  /\b(?:insert\s+into|replace\s+into|merge\s+into)\s+([A-Za-z0-9_$."`[\]]+)/i,
+  /\bupdate\s+([A-Za-z0-9_$."`[\]]+)/i,
+  /\bdelete\s+from\s+([A-Za-z0-9_$."`[\]]+)/i,
+  /\btruncate\s+table\s+([A-Za-z0-9_$."`[\]]+)/i,
+  /\b(?:create|drop|alter)\s+table\s+(?:if\s+(?:not\s+)?exists\s+)?([A-Za-z0-9_$."`[\]]+)/i,
+  /\bcreate\s+(?:unique\s+)?index\s+\S+\s+on\s+([A-Za-z0-9_$."`[\]]+)/i,
+];
+
+function inferTables(text) {
+  const out = [];
+  for (const re of TABLE_PATTERNS) {
+    const m = text.match(re);
+    if (!m) continue;
+    const name = m[1].replace(/["`[\]]/g, '').split('.').pop();
+    if (name && !out.includes(name)) out.push(name);
+  }
+  return out;
+}
+
+function classifyStatement(textRaw) {
+  const text = String(textRaw ?? '');
+  const first = firstKeyword(text);
+  const second = (text.trim().match(/^[A-Za-z]+\s+(?:or\s+replace\s+)?([A-Za-z]+)/i) ?? [])[1]?.toLowerCase() ?? '';
+  let cls = 'unknown';
+  if (['select', 'show', 'desc', 'describe', 'explain', 'with'].includes(first)) cls = 'read';
+  else if (first === 'insert') cls = 'insert';
+  else if (first === 'update') cls = 'update';
+  else if (first === 'delete') cls = 'delete';
+  else if (first === 'merge') cls = 'merge';
+  else if (first === 'truncate') cls = 'ddl_table';
+  else if (first === 'create' || first === 'drop' || first === 'alter') {
+    if (second === 'table') cls = 'ddl_table';
+    else if (['procedure', 'function', 'package', 'trigger'].includes(second)) cls = 'procedure';
+    else if (['view', 'index', 'sequence', 'trigger'].includes(second)) cls = 'ddl_other';
+    else cls = 'ddl_other';
+  } else if (first === 'call' || first === 'exec' || first === 'execute') cls = 'procedure';
+  else if (first === 'set' || first === 'use') cls = 'session';
+  else if (['start', 'commit', 'rollback', 'savepoint'].includes(first)) cls = 'txn';
+  else if (first === 'begin' || first === 'declare') cls = 'block';
+  else if (first === 'grant' || first === 'revoke') cls = 'priv';
+  return { cls, tables: inferTables(text) };
+}
+
 function splitStatements(scriptRaw, dialectRaw) {
   const dialect = normalizeDialect(dialectRaw);
   const src = String(scriptRaw ?? '');
@@ -61,9 +105,14 @@ function splitStatements(scriptRaw, dialectRaw) {
     skipEndQualifier = false;
     blockMode = false;
     blockStarted = false;
-    if (text !== '') {
-      statements.push({ idx: statements.length + 1, line: stmtLine, text, keyword: firstKeyword(text) });
-    }
+    pushStatement(text, stmtLine);
+  }
+
+  function pushStatement(text, atLine) {
+    const t = String(text).trim();
+    if (t === '') return;
+    const { cls, tables } = classifyStatement(t);
+    statements.push({ idx: statements.length + 1, line: atLine, text: t, keyword: firstKeyword(t), cls, tables });
   }
 
   // MySQL 客户端指令（spec §5.2）：独立成行且当前缓冲无实质内容才识别
@@ -127,7 +176,7 @@ function splitStatements(scriptRaw, dialectRaw) {
       const execLine = rest.match(/^(exec|execute)[ \t]+[^\n]*/i);
       if (execLine) {
         const text = execLine[0].replace(/;\s*$/, '').trim();
-        statements.push({ idx: statements.length + 1, line, text, keyword: firstKeyword(text) });
+        pushStatement(text, line);
         i += execLine[0].length - 1;
         atLineStart = false;
         continue;
@@ -253,6 +302,9 @@ function splitStatements(scriptRaw, dialectRaw) {
       const expr = s.text.replace(/^(exec|execute)\s+/i, '');
       s.text = `BEGIN ${expr}; END`;
       s.keyword = 'begin';
+      const { cls, tables } = classifyStatement(s.text);
+      s.cls = cls;
+      s.tables = tables;
     }
   }
   return { statements, warnings };
@@ -275,4 +327,4 @@ function extractScriptNo(scriptRaw) {
   return m ? m[1] : null;
 }
 
-module.exports = { splitStatements, summarize, extractScriptNo, firstKeyword, SplitterError };
+module.exports = { splitStatements, summarize, extractScriptNo, firstKeyword, classifyStatement, inferTables, SplitterError };
