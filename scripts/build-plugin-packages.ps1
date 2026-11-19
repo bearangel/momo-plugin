@@ -136,8 +136,19 @@ $dtManifest = Read-Manifest (Join-Path $plugins "dev-team")
 $dtName = "dev-team-$($dtManifest.version)"
 $null = New-Package (Join-Path $plugins "dev-team") $dtName
 
-# ---- 5. 打 zip ----
-$names = @($cgName, $emName, $ofName, $dtName)
+# ---- 5. db-pro（数据库插件：含 node_modules，四驱动全纯 JS，无平台 ABI）----
+# 前置：cd plugins/db-pro && npm install --omit=dev（依赖不入库）
+# 排除 spike/（Spike #0 验证产物，非运行时资产）
+$dbSrc = Join-Path $plugins "db-pro"
+if (-not (Test-Path (Join-Path $dbSrc "node_modules"))) {
+  throw "db-pro 缺 node_modules —— 先执行 cd plugins/db-pro && npm install --omit=dev"
+}
+$dbManifest = Read-Manifest $dbSrc
+$dbName = "db-pro-$($dbManifest.version)"
+$null = New-Package $dbSrc $dbName $null @((Join-Path $dbSrc "spike"))
+
+# ---- 6. 打 zip ----
+$names = @($cgName, $emName, $ofName, $dtName, $dbName)
 foreach ($n in $names) {
   $zip = Join-Path $dist "$n.zip"
   Remove-Item $zip -Force -ErrorAction SilentlyContinue
@@ -149,7 +160,7 @@ foreach ($n in $names) {
   Write-Host "  packed $n.zip"
 }
 
-# ---- 6. SHA256SUMS ----
+# ---- 7. SHA256SUMS ----
 $lines = foreach ($n in $names) {
   "{0}  {1}" -f (Get-FileHash (Join-Path $dist "$n.zip") -Algorithm SHA256).Hash.ToLower(), "$n.zip"
 }
