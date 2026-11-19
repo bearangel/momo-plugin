@@ -119,3 +119,24 @@ describe('script-state · status', () => {
     expect(await state.status({ requestId: 'nope' })).toEqual({ status: 'not_found' });
   });
 });
+
+describe('script-state · 作业异常路径（终审 Important）', () => {
+  it('run 抛错 → 结果为 ok:false 且 total/executed 为 0（错误文案不出 undefined）', async () => {
+    const { state, rows } = makeDeps({ run: async () => { throw new Error('engine crashed'); } });
+    const { requestId } = await state.submit({ connection: 'c', script: 'X', sessionId: 's' });
+    rows.get(requestId).status = 'answered';
+    rows.get(requestId).answerJson = JSON.stringify({ decision: 'approve' });
+    await state.status({ requestId });
+    let last = null;
+    for (let i = 0; i < 50; i += 1) {
+      last = await state.status({ requestId });
+      if (last.status === 'executed') break;
+      await new Promise((res) => setTimeout(res, 5));
+    }
+    expect(last.status).toBe('executed');
+    expect(last.result.ok).toBe(false);
+    expect(last.result.total).toBe(0);
+    expect(last.result.executed).toBe(0);
+    expect(last.result.error.message).toContain('engine crashed');
+  });
+});

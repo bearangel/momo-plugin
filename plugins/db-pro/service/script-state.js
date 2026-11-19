@@ -138,7 +138,7 @@ function createScriptState({ humanGate, analyze, run, dataDir, log }) {
         })
         .catch((err) => {
           const message = err instanceof Error ? err.message : String(err);
-          const result = { ok: false, error: { code: 'service_error', message }, durationMs: Date.now() - started };
+          const result = { ok: false, total: 0, executed: 0, error: { code: 'service_error', message }, durationMs: Date.now() - started };
           append({
             requestId, status: 'failed', at: Date.now(), connection: payload.connection,
             scriptNo: payload.scriptNo ?? null, errorSummary: message, durationMs: result.durationMs, result,
