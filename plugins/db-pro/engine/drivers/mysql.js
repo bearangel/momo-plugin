@@ -125,6 +125,18 @@ async function createPool(connUrl, opts = {}) {
       const r = await run(sql, 0);
       return { affectedRows: r.kind === 'header' ? r.affectedRows : r.rows.length };
     },
+    async openSession() {
+      const conn = await pool.getConnection();
+      return {
+        async exec(sql) {
+          const [res] = await conn.query({ sql, timeout: timeoutMs });
+          const affectedRows = Array.isArray(res) ? res.length : (res.affectedRows ?? 0);
+          return { affectedRows };
+        },
+        async finish() {},
+        async close() { conn.release(); },
+      };
+    },
     async close() {
       await pool.end();
     },

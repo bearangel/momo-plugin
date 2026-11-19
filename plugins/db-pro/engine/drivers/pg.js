@@ -112,6 +112,17 @@ async function createPool(connUrl, opts = {}) {
       const res = await pool.query({ text: sql, values: [] });
       return { affectedRows: res.rowCount ?? 0 };
     },
+    async openSession() {
+      const client = await pool.connect();
+      return {
+        async exec(sql) {
+          const res = await client.query({ text: sql, values: [] });
+          return { affectedRows: res.rowCount ?? 0 };
+        },
+        async finish() {},
+        async close() { client.release(); },
+      };
+    },
     async close() {
       await pool.end();
     },
