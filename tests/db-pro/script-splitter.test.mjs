@@ -67,3 +67,32 @@ describe('splitStatements · MySQL DELIMITER', () => {
     expect(r.statements.map((s) => s.text)).toEqual(['SELECT 1', 'SELECT 2']);
   });
 });
+
+describe('splitStatements · PostgreSQL profile', () => {
+  it('CREATE FUNCTION $$ 体内分号不切分', () => {
+    const script = [
+      'CREATE FUNCTION f_demo() RETURNS void AS $$',
+      'BEGIN',
+      '  INSERT INTO t VALUES (1);',
+      'END;',
+      '$$ LANGUAGE plpgsql;',
+      'SELECT f_demo();',
+    ].join('\n');
+    const r = splitStatements(script, 'postgres');
+    expect(r.statements).toHaveLength(2);
+    expect(r.statements[0].keyword).toBe('create');
+    expect(r.statements[1].keyword).toBe('select');
+  });
+  it('带标签的美元引用 $body$ 正常闭合', () => {
+    const r = splitStatements('DO $body$ BEGIN PERFORM 1; END $body$;\nSELECT 1;', 'postgresql');
+    expect(r.statements).toHaveLength(2);
+  });
+  it('行首反斜杠元命令 → 明确拒绝', () => {
+    expect(() => splitStatements('\\i /tmp/a.sql\nSELECT 1;', 'postgres'))
+      .toThrow(/psql 元命令/);
+  });
+  it('未闭合美元引用 → 报错', () => {
+    expect(() => splitStatements('CREATE FUNCTION f() AS $$ BEGIN RETURN;', 'postgres'))
+      .toThrow(/美元引用/);
+  });
+});

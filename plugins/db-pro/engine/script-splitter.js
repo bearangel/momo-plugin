@@ -38,6 +38,7 @@ function splitStatements(scriptRaw, dialectRaw) {
   let lineComment = false;
   let atLineStart = true;
   let terminator = ';';
+  let dollarTag = null;
 
   function flush() {
     const text = buf.trim();
@@ -83,7 +84,20 @@ function splitStatements(scriptRaw, dialectRaw) {
       }
     }
 
-    if (quote === null && !blockComment && !lineComment) {
+    if (quote === null && !blockComment && !lineComment && dollarTag === null) {
+      if (dialect === 'postgres' && atLineStart && buf.trim() === '' && c === '\\') {
+        throw new SplitterError(`第 ${line} 行：不支持 psql 元命令（\\...）——请将目标文件内容内联为 SQL`, line);
+      }
+      if (dialect === 'postgres' && c === '$') {
+        const m = src.slice(i).match(/^\$([A-Za-z_][A-Za-z0-9_]*)?\$/);
+        if (m) {
+          dollarTag = m[0];
+          buf += m[0];
+          i += m[0].length - 1;
+          atLineStart = false;
+          continue;
+        }
+      }
       markStartIfNeeded(c);
       // 行注释（-- 后须空白/行尾；MySQL 语法）与 MySQL # 注释——内容不入语句文本
       if (c === '-' && next === '-') {
@@ -112,6 +126,19 @@ function splitStatements(scriptRaw, dialectRaw) {
 
     if (blockComment) {
       if (c === '*' && next === '/') { i += 1; blockComment = false; }
+      continue;
+    }
+
+    if (dollarTag !== null) {
+      if (src.startsWith(dollarTag, i)) {
+        buf += dollarTag;
+        i += dollarTag.length - 1;
+        dollarTag = null;
+        atLineStart = false;
+        continue;
+      }
+      buf += c;
+      atLineStart = false;
       continue;
     }
 
@@ -148,6 +175,7 @@ function splitStatements(scriptRaw, dialectRaw) {
 
   if (quote !== null) throw new SplitterError(`第 ${line} 行：${quote} 引号未闭合`, line);
   if (blockComment) throw new SplitterError(`第 ${line} 行：块注释未闭合`, line);
+  if (dollarTag !== null) throw new SplitterError(`第 ${line} 行：美元引用 ${dollarTag} 未闭合`, line);
   flush();
   return { statements, warnings };
 }
