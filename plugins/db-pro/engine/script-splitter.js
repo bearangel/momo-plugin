@@ -39,10 +39,28 @@ function splitStatements(scriptRaw, dialectRaw) {
   let atLineStart = true;
   let terminator = ';';
   let dollarTag = null;
+  const isPlsql = dialect === 'oracle' || dialect === 'dm';
+  let depth = 0;
+  let skipEndQualifier = false;
+  let blockMode = false;
+  let blockStarted = false;
+
+  function handlePlsqlWord(word) {
+    const w = word.toLowerCase();
+    if (skipEndQualifier && (w === 'if' || w === 'loop' || w === 'case')) {
+      skipEndQualifier = false;
+      return;
+    }
+    if (w === 'end') { depth = Math.max(0, depth - 1); skipEndQualifier = true; return; }
+    if (w === 'begin' || w === 'loop' || w === 'case' || w === 'if') depth += 1;
+  }
 
   function flush() {
     const text = buf.trim();
     buf = '';
+    skipEndQualifier = false;
+    blockMode = false;
+    blockStarted = false;
     if (text !== '') {
       statements.push({ idx: statements.length + 1, line: stmtLine, text, keyword: firstKeyword(text) });
     }
@@ -80,6 +98,38 @@ function splitStatements(scriptRaw, dialectRaw) {
         line += (consumed.match(/\n/g) ?? []).length;
         i = skipTo;
         atLineStart = true;
+        continue;
+      }
+    }
+
+    if (isPlsql && quote === null && !blockComment && !lineComment && atLineStart && buf.trim() === '') {
+      const rest = src.slice(i);
+      const filtered = rest.match(/^(set|prompt|show|clear|define|undefine|spool)\b[^\n]*\r?\n?/i);
+      if (filtered) {
+        warnings.push({ line, type: 'filtered_directive', message: `已忽略 SQL*Plus 指令：${filtered[0].trim()}` });
+        line += (filtered[0].match(/\n/g) ?? []).length;
+        i += filtered[0].length - 1;
+        atLineStart = true;
+        continue;
+      }
+      const rejected = rest.match(/^(exit|quit|whenever|host|start|@@?)\b/i);
+      if (rejected) {
+        throw new SplitterError(`第 ${line} 行：不支持控制流/包含指令 "${rejected[1].toUpperCase()}"——请内联脚本内容并移除该指令`, line);
+      }
+      const slash = rest.match(/^\/[ \t]*\r?\n?/);
+      if (slash) {
+        flush();
+        line += (slash[0].match(/\n/g) ?? []).length;
+        i += slash[0].length - 1;
+        atLineStart = true;
+        continue;
+      }
+      const execLine = rest.match(/^(exec|execute)[ \t]+[^\n]*/i);
+      if (execLine) {
+        const text = execLine[0].replace(/;\s*$/, '').trim();
+        statements.push({ idx: statements.length + 1, line, text, keyword: firstKeyword(text) });
+        i += execLine[0].length - 1;
+        atLineStart = false;
         continue;
       }
     }
@@ -162,6 +212,27 @@ function splitStatements(scriptRaw, dialectRaw) {
       continue;
     }
 
+    if (isPlsql && /[A-Za-z_]/.test(c)) {
+      let j = i;
+      while (j < src.length && /[A-Za-z_]/.test(src[j])) j += 1;
+      const word = src.slice(i, j);
+      markStartIfNeeded(c);
+      if (buf.trim() === '' && /^(begin|declare)$/i.test(word)) blockMode = true;
+      if (blockMode && /^begin$/i.test(word)) blockStarted = true;
+      if (/^(procedure|function|trigger|package|type)$/i.test(word) && /^create\b/i.test(buf.trim())) blockMode = true;
+      if (blockMode) handlePlsqlWord(word);
+      buf += word;
+      i = j - 1;
+      atLineStart = false;
+      continue;
+    }
+
+    if (isPlsql && c === ';' && blockMode && (depth > 0 || !blockStarted)) {
+      buf += c;
+      atLineStart = false;
+      continue;
+    }
+
     if (src.startsWith(terminator, i)) {
       flush();
       i += terminator.length - 1;
@@ -177,6 +248,13 @@ function splitStatements(scriptRaw, dialectRaw) {
   if (blockComment) throw new SplitterError(`第 ${line} 行：块注释未闭合`, line);
   if (dollarTag !== null) throw new SplitterError(`第 ${line} 行：美元引用 ${dollarTag} 未闭合`, line);
   flush();
+  for (const s of statements) {
+    if (isPlsql && (s.keyword === 'exec' || s.keyword === 'execute')) {
+      const expr = s.text.replace(/^(exec|execute)\s+/i, '');
+      s.text = `BEGIN ${expr}; END`;
+      s.keyword = 'begin';
+    }
+  }
   return { statements, warnings };
 }
 
