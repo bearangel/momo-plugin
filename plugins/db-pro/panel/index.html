@@ -13,6 +13,7 @@
     --status-success: rgb(35,131,92); --status-warning: rgb(183,121,31); --status-error: rgb(211,63,73);
     --status-success-tint: rgba(35,131,92,.12); --status-warning-tint: rgba(183,121,31,.12); --status-error-tint: rgba(211,63,73,.12);
     --surface-active: rgba(94,106,210,.12);
+    --bg-backdrop: rgba(24,25,26,.45);
   }
   :root[data-theme="dark"] {
     color-scheme: dark;
@@ -23,6 +24,7 @@
     --status-success: rgb(76,183,130); --status-warning: rgb(242,201,76); --status-error: rgb(235,87,87);
     --status-success-tint: rgba(76,183,130,.16); --status-warning-tint: rgba(242,201,76,.16); --status-error-tint: rgba(235,87,87,.16);
     --surface-active: rgba(94,106,210,.22);
+    --bg-backdrop: rgba(0,0,0,.6);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   html, body { height: 100%; }
@@ -61,7 +63,7 @@
   .star.on { color: var(--status-warning); }
   .side-ft { margin-top: auto; padding: 9px 12px; border-top: 1px solid var(--border-subtle); font-size: 10.5px; color: var(--text-tertiary); }
   .empty-side { padding: 26px 14px; text-align: center; color: var(--text-tertiary); font-size: 11.5px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
-  .editor { padding: 16px 20px 56px; display: flex; flex-direction: column; gap: 13px; overflow: auto; min-height: 0; width: 100%; max-width: 860px; }
+  .editor { padding: 16px 20px 12px; display: flex; flex-direction: column; gap: 13px; overflow: auto; min-height: 0; width: 100%; max-width: 860px; }
   .ed-hd { display: flex; align-items: center; gap: 8px; }
   .ed-hd h3 { font-size: 13px; font-weight: 600; flex: 1; }
   .lbl { display: block; font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
@@ -95,8 +97,16 @@
   .empty-main { flex: 1; display: flex; flex-direction: column; gap: 6px; align-items: center; justify-content: center; color: var(--text-tertiary); font-size: 12px; }
   .empty-main .big { width: 26px; height: 26px; color: var(--text-disabled); }
   .banner { border-radius: 6px; padding: 6px 9px; font-size: 11.5px; background: var(--status-error-tint); color: var(--status-error); }
-  .confirm-bar { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; align-items: center; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--border-strong); background: var(--surface-1); font-size: 11.5px; box-shadow: 0 -4px 14px rgba(0,0,0,.08); }
-  .confirm-bar .msg { flex: 1; color: var(--text-secondary); }
+  .overlay { position: fixed; inset: 0; z-index: 100; background: var(--bg-backdrop); display: none; align-items: center; justify-content: center; }
+  .overlay.show { display: flex; }
+  .dialog { width: 380px; background: var(--surface-1); border: 1px solid var(--border-subtle); border-radius: 10px; box-shadow: 0 12px 32px rgba(0,0,0,.18); padding: 18px 20px 14px; }
+  .dialog h3 { font-size: 13px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+  .dialog h3 .ico { width: 16px; height: 16px; color: var(--status-error); }
+  .dialog p { margin: 10px 0 16px; font-size: 12px; line-height: 1.65; color: var(--text-secondary); }
+  .dialog p .name { color: var(--text-primary); font-weight: 600; }
+  .dialog .ft { display: flex; justify-content: flex-end; gap: 8px; }
+  .btn.destructive { background: var(--status-error); border-color: var(--status-error); color: #fff; }
+  .btn.destructive:hover { filter: brightness(1.08); }
 </style>
 </head>
 <body>
@@ -112,10 +122,18 @@
   </div>
   <div class="editor" id="editor"></div>
 </div>
-<div class="confirm-bar" id="confirm-bar">
-  <span class="msg"></span>
-  <button class="btn sm" id="confirm-ok">确认</button>
-  <button class="btn sm ghost" id="confirm-cancel">取消</button>
+<div class="overlay" id="confirm-overlay">
+  <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="confirm-title">
+    <h3 id="confirm-title">
+      <svg class="ico" viewBox="0 0 24 24"><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+      删除连接
+    </h3>
+    <p id="confirm-msg"></p>
+    <div class="ft">
+      <button class="btn ghost" id="confirm-cancel">取消</button>
+      <button class="btn destructive" id="confirm-ok">删除</button>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -386,20 +404,33 @@
   }
 
   var confirmResolve = null;
-  function inlineConfirm(message) {
-    var bar = $('confirm-bar');
-    bar.querySelector('.msg').textContent = message;
-    bar.style.display = 'flex';
-    return new Promise(function (resolve) {
-      confirmResolve = resolve;
-      $('confirm-ok').onclick = function () { bar.style.display = 'none'; confirmResolve = null; resolve(true); };
-      $('confirm-cancel').onclick = function () { bar.style.display = 'none'; confirmResolve = null; resolve(false); };
-    });
+  function closeConfirm(ok) {
+    var overlay = $('confirm-overlay');
+    overlay.classList.remove('show');
+    document.removeEventListener('keydown', onConfirmKey);
+    var resolve = confirmResolve;
+    confirmResolve = null;
+    if (resolve) resolve(ok);
+  }
+  function onConfirmKey(ev) {
+    if (ev.key === 'Escape') closeConfirm(false);
+  }
+  function inlineConfirm(html) {
+    var overlay = $('confirm-overlay');
+    $('confirm-msg').innerHTML = html;
+    overlay.classList.add('show');
+    document.addEventListener('keydown', onConfirmKey);
+    $('confirm-ok').onclick = function () { closeConfirm(true); };
+    $('confirm-cancel').onclick = function () { closeConfirm(false); };
+    overlay.onclick = function (ev) { if (ev.target === overlay) closeConfirm(false); };
+    var cancel = $('confirm-cancel');
+    if (cancel && cancel.focus) cancel.focus();
+    return new Promise(function (resolve) { confirmResolve = resolve; });
   }
 
   function onDelete() {
     var f = S.form;
-    inlineConfirm('删除连接「' + f.name + '」？该连接的密钥将一并清除。').then(function (yes) {
+    inlineConfirm('确定删除连接 <span class="name">' + esc(f.name) + '</span>？该连接的密钥将一并清除，此操作不可撤销。').then(function (yes) {
       if (!yes) return;
       withBusy(function () { return call('connectionsRemove', { id: f.id }); })
         .then(function (res) {
