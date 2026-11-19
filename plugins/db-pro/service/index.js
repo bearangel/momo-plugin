@@ -217,12 +217,6 @@ function createService(ctx) {
     }
   }
 
-  function defaultConnection() {
-    const proj = store.listProjection();
-    const def = proj.find((c) => c.isDefault);
-    return (def ?? proj[0])?.name ?? '';
-  }
-
   // I-6（复审）：URL 形态守卫——无 scheme 槽值（如裸 127.0.0.1）不炸整表
   function dialectOf(url) {
     try {
@@ -254,9 +248,11 @@ function createService(ctx) {
     if (method === 'writeStatus') return writeState.status(params);
     if (method === 'scriptExecute') {
       if (child) await ensureConfig();
-      const withConn = params.connection ? params : { ...params, connection: defaultConnection() };
-      validateWriteConnection(lastConnections, withConn.connection);
-      return scriptState.submit(withConn);
+      if (typeof params.connection !== 'string' || params.connection === '') {
+        throw new Error('必须指定 connection（连接名）——请先 list_connections 查看可用连接');
+      }
+      validateWriteConnection(lastConnections, params.connection);
+      return scriptState.submit(params);
     }
     if (method === 'scriptStatus') return scriptState.status(params);
     if (method === 'scriptHistory') return scriptState.history(params);
@@ -279,10 +275,6 @@ function createService(ctx) {
       await ensureConfig();
       return { connections: store.listProjection() };
     }
-    if (method === 'connectionsSetDefault') {
-      await store.setDefault(String(params.id));
-      return { connections: store.listProjection() };
-    }
     if (method === 'connectionsTest') {
       let url = typeof params.url === 'string' && params.url.trim() !== '' ? params.url.trim() : '';
       if (url === '') {
@@ -301,7 +293,7 @@ function createService(ctx) {
         connections: store.listProjection().map((c) => {
           const reason = lastUnavailable.get(c.name);
           return {
-            name: c.name, dialect: c.dialect, permissions: c.permissions,
+            name: c.name, description: c.description ?? '', dialect: c.dialect, permissions: c.permissions,
             ok: reason === undefined, ...(reason !== undefined ? { reason } : {}),
           };
         }),
@@ -311,7 +303,9 @@ function createService(ctx) {
       if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
       await ensureConfig();
       const p = { ...params };
-      if (!p.connection) p.connection = defaultConnection();
+      if (typeof p.connection !== 'string' || p.connection === '') {
+        throw new Error('必须指定 connection（连接名）——请先 list_connections 查看可用连接（名称与描述说明其用途）');
+      }
       if (method === 'query') {
         // M-A（复审）：rpc 超时随配置走（引擎侧超时 + 5s 余量，桥上限 60s 内）；
         // 超时/行数均过净化（负值归缺省——-40 实证：负超时直传致全量瞬时超时）

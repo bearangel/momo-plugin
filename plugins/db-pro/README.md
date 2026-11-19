@@ -9,6 +9,7 @@ momo-studio → 设置 → 插件 → 开发目录安装 → 选本目录。依�
 ## 配置（插件「数据库」面板）
 
 连接在插件自带面板管理（侧栏连接列表 + 右侧编辑）：名称、描述、连接 URL、逐连接权限。
+**无「缺省连接」**：agent 每次操作必须显式指定 `connection`；名称与描述用于说明该库用途（`list_connections` 会带出描述）。
 格式：`mysql://user:pass@host:3306/db` · `postgres://user:pass@host:5432/db` · `oracle://user:pass@host:1521/服务名`（Oracle 11g 不支持） · `dm://user:pass@host:5236`。
 URL 明文只入 keytar，面板与工具均不回显密码。旧版设置页 `conn1`–`conn6` 配置在首次启动时自动迁移（保等效全权限，旧密钥清除）。
 

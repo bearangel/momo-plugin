@@ -131,3 +131,23 @@ describe('script_* 工具', () => {
     expect(item.defaultOn).toBe(false);
   });
 });
+
+// 无缺省连接概念（2026-11-19 用户裁定）：所有库操作工具 connection 必填。
+describe('connection 必填契约', () => {
+  it('全部数据库操作工具 required 含 connection', () => {
+    const defs = createTools({ callService: async () => ({}) }).getDefs();
+    const need = ['query', 'list_schemas', 'list_tables', 'list_views', 'describe_table', 'list_columns', 'get_ddl', 'explain_query', 'write', 'script_execute'];
+    for (const name of need) {
+      const d = defs.find((x) => x.name === name);
+      expect(d.inputSchema.required).toContain('connection');
+      expect(d.inputSchema.properties.connection.description).not.toContain('缺省');
+    }
+  });
+  it('list_connections 渲染包含描述（用途说明）', async () => {
+    const tools = createTools({
+      callService: async () => ({ connections: [{ name: 'mysql_dev', dialect: 'mysql', description: '开发库 · 只读', ok: true }] }),
+    });
+    const text = await tools.execute('list_connections', {}, { roomId: 'r' });
+    expect(text).toContain('开发库 · 只读');
+  });
+});

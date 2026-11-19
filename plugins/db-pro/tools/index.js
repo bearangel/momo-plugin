@@ -9,7 +9,7 @@ const CALL_TIMEOUT_MS = 60_000; // 桥上限（spec §2 事实 1）
 const DEFS = [
   {
     name: 'list_connections',
-    description: '列出已配置的数据库连接（名称 + 类型，不含凭据）。查询前先调用此工具确认可用连接。',
+    description: '列出已配置的数据库连接（名称 / 类型 / 描述，不含凭据）。名称与描述说明该库用途——所有数据库操作都必须显式指定 connection。',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -17,8 +17,8 @@ const DEFS = [
     description: '列出指定数据库的 schema 清单。',
     inputSchema: {
       type: 'object',
-      properties: { connection: { type: 'string', description: '连接名（省略用缺省连接）' } },
-      required: [],
+      properties: { connection: { type: 'string', description: '连接名（必填）' } },
+      required: ['connection'],
     },
   },
   {
@@ -27,10 +27,10 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
       },
-      required: [],
+      required: ['connection'],
     },
   },
   {
@@ -39,10 +39,10 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
       },
-      required: [],
+      required: ['connection'],
     },
   },
   {
@@ -51,11 +51,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
         table: { type: 'string', description: '表名' },
       },
-      required: ['table'],
+      required: ['connection', 'table'],
     },
   },
   {
@@ -64,11 +64,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
         table: { type: 'string', description: '表名' },
       },
-      required: ['table'],
+      required: ['connection', 'table'],
     },
   },
   {
@@ -77,11 +77,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
         table: { type: 'string', description: '表名' },
       },
-      required: ['table'],
+      required: ['connection', 'table'],
     },
   },
   {
@@ -90,11 +90,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         sql: { type: 'string', description: '只读 SQL 语句（单条）' },
         max_rows: { type: 'number', description: '本次返回行数上限（省略用全局配置，默认 200）' },
       },
-      required: ['sql'],
+      required: ['connection', 'sql'],
     },
   },
   {
@@ -103,10 +103,10 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         sql: { type: 'string', description: '要分析的 SELECT 语句' },
       },
-      required: ['sql'],
+      required: ['connection', 'sql'],
     },
   },
   {
@@ -136,12 +136,12 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         script: { type: 'string', description: '脚本全文（≤2MB、≤10000 条语句）' },
         on_error: { type: 'string', enum: ['abort', 'continue'], description: '失败策略（省略 abort=失败即停）' },
         dryrun: { type: 'boolean', description: 'true=只做静态分析并返回语句清单' },
       },
-      required: ['script'],
+      required: ['connection', 'script'],
     },
   },
   {
@@ -241,10 +241,11 @@ function render(name, res) {
   }
   if (name === 'list_connections') {
     return res.connections.length === 0
-      ? '（未配置连接——请在 设置 → 插件 → db-pro 配置连接串）'
+      ? '（未配置连接——请在插件「数据库」面板添加）'
       : res.connections.map((c) => {
-          if (c.ok === false) return `- ${c.name}（${c.dialect}，⚠ 配置失败：${c.reason}）`;
-          return `- ${c.name}（${c.dialect}）`;
+          const desc = c.description ? ` · ${c.description}` : '';
+          if (c.ok === false) return `- ${c.name}（${c.dialect}${desc}，⚠ 配置失败：${c.reason}）`;
+          return `- ${c.name}（${c.dialect}${desc}）`;
         }).join('\n');
   }
   if (name === 'get_ddl') return res.ddl;

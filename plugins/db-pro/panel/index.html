@@ -59,8 +59,6 @@
   .badge.rw { background: var(--status-success-tint); color: var(--status-success); }
   .badge.full { background: var(--status-warning-tint); color: var(--status-warning); }
   .badge.cust { background: var(--surface-2); color: var(--text-secondary); border-color: var(--border-subtle); }
-  .star { color: var(--text-disabled); cursor: pointer; }
-  .star.on { color: var(--status-warning); }
   .side-ft { margin-top: auto; padding: 9px 12px; border-top: 1px solid var(--border-subtle); font-size: 10.5px; color: var(--text-tertiary); }
   .empty-side { padding: 26px 14px; text-align: center; color: var(--text-tertiary); font-size: 11.5px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
   .editor { padding: 16px 20px 12px; display: flex; flex-direction: column; gap: 13px; overflow: auto; min-height: 0; width: 100%; max-width: 860px; }
@@ -233,11 +231,10 @@
     var h = '';
     S.conns.forEach(function (c) {
       var b = badgeOf(c.permissions);
-      h += '<div class="conn' + (c.id === S.selId && S.mode === 'view' ? ' on' : '') + '" data-id="' + attrEsc(c.id) + '">' +
+      h += '<div class="conn' + (c.id === S.selId && S.mode === 'view' ? ' on' : '') + '" data-id="' + attrEsc(c.id) + '" title="' + attrEsc((c.name || '') + (c.description ? ' — ' + c.description : '')) + '">' +
         '<svg class="icon sm" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>' +
         '<span class="nm">' + esc(c.name) + '</span>' +
         '<span class="badge ' + b[0] + '">' + esc(b[1]) + '</span>' +
-        (c.isDefault ? '<svg class="icon sm star on" viewBox="0 0 24 24"><path d="M12 3l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3-5.8 3 1.1-6.5L2.6 9.8l6.5-.9z"/></svg>' : '') +
         '</div>';
     });
     box.innerHTML = h;
@@ -271,7 +268,6 @@
     h += '<div class="ed-hd">' +
       '<h3>' + esc(isNew ? '新建连接' : f.name) + '</h3>' +
       '<span class="badge ' + b[0] + '">' + esc(b[1]) + '</span>' +
-      (!isNew ? '<svg class="icon sm star' + (f.isDefault ? ' on' : '') + '" id="btn-star" title="设为缺省连接" viewBox="0 0 24 24"><path d="M12 3l2.9 5.9 6.5.9-4.7 4.6 1.1 6.5-5.8-3-5.8 3 1.1-6.5L2.6 9.8l6.5-.9z"/></svg>' : '') +
       '</div>';
     if (S.err) h += '<div class="banner">' + esc(S.err) + '</div>';
     h += '<div class="row2">' +
@@ -305,8 +301,6 @@
   }
 
   function bindEditor() {
-    var star = $('btn-star');
-    if (star) star.onclick = function () { return withBusy(function () { return call('connectionsSetDefault', { id: S.form.id }); }); };
     var url = $('f-url');
     if (url && url.readOnly) url.onclick = function () { S.form.urlDirty = true; S.form.url = ''; renderEditor(); var el = $('f-url'); if (el) el.focus(); };
     var presets = document.querySelectorAll('input[name="preset"]');
@@ -449,7 +443,7 @@
     S.selId = c.id;
     S.test = null;
     S.err = '';
-    S.form = { id: c.id, name: c.name, description: c.description || '', permissions: (c.permissions || []).slice(), hasUrl: !!c.hasUrl, url: '', urlDirty: false, isDefault: !!c.isDefault };
+    S.form = { id: c.id, name: c.name, description: c.description || '', permissions: (c.permissions || []).slice(), hasUrl: !!c.hasUrl, url: '', urlDirty: false };
     renderList();
     renderEditor();
   }
@@ -469,7 +463,7 @@
     S.selId = null;
     S.test = null;
     S.err = '';
-    S.form = { name: '', description: '', permissions: PRESETS.read.slice(), hasUrl: false, url: '', urlDirty: true, isDefault: false };
+    S.form = { name: '', description: '', permissions: PRESETS.read.slice(), hasUrl: false, url: '', urlDirty: true };
     renderList();
     renderEditor();
   }

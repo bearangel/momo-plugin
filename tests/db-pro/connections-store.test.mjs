@@ -32,14 +32,13 @@ describe('connections-store CRUD', () => {
     await expect(store.create({ name: 'bad', url: 'sqlite://x' })).rejects.toThrow(/协议/);
   });
 
-  it('update 改名/改权限；remove 清密钥；setDefault 单点', async () => {
+  it('update 改名/改权限；remove 清密钥；无缺省字段', async () => {
     const { store, kv } = mkStore();
     const a = await store.create({ name: 'a', url: 'mysql://u:p@h/a', permissions: ['query'] });
-    const b = await store.create({ name: 'b', url: 'postgres://u:p@h/b', permissions: ['query'] });
+    await store.create({ name: 'b', url: 'postgres://u:p@h/b', permissions: ['query'] });
     await store.update(a.id, { name: 'a2', permissions: ['query', 'insert'] });
     expect(store.listProjection().find((x) => x.id === a.id)).toMatchObject({ name: 'a2', permissions: ['query', 'insert'] });
-    await store.setDefault(b.id);
-    expect(store.listProjection().filter((x) => x.isDefault)).toHaveLength(1);
+    expect(store.listProjection().every((x) => !('isDefault' in x))).toBe(true);
     await store.remove(a.id);
     expect(kv.get(`conn.${a.id}.url`)).toBeUndefined();
     expect(store.listProjection()).toHaveLength(1);
@@ -78,12 +77,23 @@ describe('migrateLegacy（保等效）', () => {
     const proj = store.listProjection();
     expect(proj).toHaveLength(2);
     expect(proj.every((x) => x.permissions.length === 8)).toBe(true);
-    expect(proj.find((x) => x.isDefault)?.name).toBe('dm_test');
+    expect(proj.every((x) => !('isDefault' in x))).toBe(true);
     expect(kv.get('conn1_url')).toBeUndefined();
     expect(kv.get('conn2_url')).toBeUndefined();
     await store.migrateLegacy(legacy);
     expect(store.listProjection()).toHaveLength(2);
     void secrets;
+  });
+
+  it('旧文件中的 isDefault 字段被归一化剔除（重写后不再出现）', async () => {
+    const { dir, secrets } = mkStore();
+    fs.writeFileSync(path.join(dir, 'connections.json'), JSON.stringify([
+      { id: 'c_old', name: 'old', description: '', permissions: ['query'], isDefault: true, createdAt: 1, updatedAt: 1 },
+    ]));
+    const s2 = createConnectionsStore({ dataDir: dir, secrets, log: () => undefined });
+    await s2.update('c_old', { description: 'x' });
+    const raw = JSON.parse(fs.readFileSync(path.join(dir, 'connections.json'), 'utf-8'));
+    expect(raw[0].isDefault).toBeUndefined();
   });
 
   it('无旧配置 → 不创建任何连接', async () => {

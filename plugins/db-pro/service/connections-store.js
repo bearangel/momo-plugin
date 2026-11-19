@@ -28,7 +28,11 @@ function createConnectionsStore({ dataDir, secrets, log }) {
   function readAll() {
     try {
       const parsed = JSON.parse(fs.readFileSync(file, 'utf-8'));
-      return Array.isArray(parsed) ? parsed : [];
+      if (!Array.isArray(parsed)) return [];
+      return parsed.map((r) => {
+        const { isDefault, ...rest } = r;
+        return rest;
+      });
     } catch {
       return [];
     }
@@ -60,7 +64,7 @@ function createConnectionsStore({ dataDir, secrets, log }) {
       const cached = urlCache.get(r.id);
       return {
         id: r.id, name: r.name, description: r.description ?? '',
-        permissions: r.permissions, isDefault: r.isDefault === true,
+        permissions: r.permissions,
         dialect: cached ? dialectOf(cached) : 'unknown',
         hasUrl: cached !== undefined,
       };
@@ -102,7 +106,7 @@ function createConnectionsStore({ dataDir, secrets, log }) {
     const permissions = normalizePermissions(input.permissions?.length ? input.permissions : PRESETS.read);
     const rec = {
       id, name, description: String(input.description ?? ''), permissions,
-      isDefault: records.length === 0, createdAt: Date.now(), updatedAt: Date.now(),
+      createdAt: Date.now(), updatedAt: Date.now(),
     };
     await secrets.set(secretKey(id), url);
     urlCache.set(id, url);
@@ -137,13 +141,6 @@ function createConnectionsStore({ dataDir, secrets, log }) {
     records = records.filter((r) => r.id !== id);
     await secrets.delete(secretKey(id));
     urlCache.delete(id);
-    if (records.length > 0 && !records.some((r) => r.isDefault)) records[0].isDefault = true;
-    writeAll(records);
-  }
-
-  async function setDefault(id) {
-    if (!records.some((r) => r.id === id)) throw new Error('连接不存在');
-    for (const r of records) r.isDefault = r.id === id;
     writeAll(records);
   }
 
@@ -158,26 +155,23 @@ function createConnectionsStore({ dataDir, secrets, log }) {
       found.push({ name, url });
     }
     if (found.length === 0) return { migrated: 0 };
-    const defName = typeof legacyConfig.default_connection === 'string' ? legacyConfig.default_connection.trim() : '';
     const next = [];
-    for (const [idx, item] of found.entries()) {
+    for (const item of found) {
       const id = newId();
       await secrets.set(secretKey(id), item.url);
       urlCache.set(id, item.url);
       next.push({
         id, name: item.name, description: '（自旧版配置迁移）', permissions: [...LEGACY_FULL],
-        isDefault: defName ? item.name === defName : idx === 0,
         createdAt: Date.now(), updatedAt: Date.now(),
       });
     }
     records = next;
-    if (!records.some((r) => r.isDefault)) records[0].isDefault = true;
     writeAll(records);
     for (let i = 1; i <= 6; i += 1) await secrets.delete(`conn${i}_url`).catch(() => undefined);
     return { migrated: records.length };
   }
 
-  return { listProjection, listForEngine, warm, create, update, remove, setDefault, migrateLegacy };
+  return { listProjection, listForEngine, warm, create, update, remove, migrateLegacy };
 }
 
 module.exports = { createConnectionsStore };
