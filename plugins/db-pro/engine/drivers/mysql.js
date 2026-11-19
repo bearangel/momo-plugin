@@ -38,6 +38,7 @@ async function createPool(connUrl, opts = {}) {
     multipleStatements: false,
     dateStrings: true,
     supportBigNumbers: true,
+    connectTimeout: opts.connectTimeoutMs ?? 10_000,
   });
 
   /** 统一 run：SELECT/SHOW → rows 形态；无结果集语句 → header 形态 */

@@ -226,6 +226,16 @@ function createService(ctx) {
     }
   }
 
+  /** URL → host:port/db（不含凭据；错误文案用） */
+  function endpointOf(url) {
+    try {
+      const u = new URL(url);
+      return `${u.hostname}:${u.port || '?'}${u.pathname && u.pathname !== '/' ? u.pathname : ''}`;
+    } catch {
+      return '';
+    }
+  }
+
   function dialectOfUrl(name) {
     const conn = lastConnections.find((c) => c.name === name);
     return conn ? dialectOf(conn.url) : 'mysql';
@@ -281,11 +291,22 @@ function createService(ctx) {
       if (url === '' && name !== '') {
         if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
         await ensureConfig();
-        return await rpc('connTest', { name }, 20_000);
+        const rows = await store.listForEngine().catch(() => []);
+        const hit = rows.find((r) => r.name === name);
+        const endpoint = hit ? endpointOf(hit.url) : '';
+        try {
+          return await rpc('connTest', { name }, 20_000);
+        } catch (err) {
+          throw new Error(`连接 "${name}"${endpoint ? `（${endpoint}）` : ''} 测试失败：${err.message}`);
+        }
       }
       if (url === '') throw new Error('connectionsTest 须提供 name 或 url');
       const timeoutMs = sanitizeTimeoutMs(ctx.getConfig().query_timeout_ms);
-      return await rpc('probe', { url, queryTimeoutMs: timeoutMs }, 20_000);
+      try {
+        return await rpc('probe', { url, queryTimeoutMs: timeoutMs }, 20_000);
+      } catch (err) {
+        throw new Error(`连接 ${endpointOf(url)} 探测失败：${err.message}`);
+      }
     }
     if (method === 'listConnections') {
       if (child) await ensureConfig();
