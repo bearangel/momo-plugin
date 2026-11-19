@@ -3,6 +3,7 @@
 // 协议：NDJSON JSON-RPC（protocol.js）；驱动懒加载（缺方言不拖垮其他连接）。
 const { runServer, EngineError, CODES } = require('./protocol');
 const { assertReadOnly } = require('./sql-validator');
+const { splitStatements, summarize, extractScriptNo } = require('./script-splitter');
 
 const DIALECT_LOADERS = {
   mysql: () => require('./drivers/mysql'),
@@ -12,6 +13,14 @@ const DIALECT_LOADERS = {
   dm: () => require('./drivers/dm'),
   dameng: () => require('./drivers/dm'),
 };
+
+function dialectOfUrl(url) {
+  try {
+    return new URL(url).protocol.replace(':', '');
+  } catch {
+    return 'mysql';
+  }
+}
 
 function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new Map()) {
   // 坏连接名 → 失败原因（configure 逐连接隔离，终审 I2：单连接失败不拖垮整批）
@@ -79,6 +88,65 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         const explainCheck = assertReadOnly(params.sql);
         if (!explainCheck.ok) throw new EngineError(CODES.VALIDATION, explainCheck.reason);
         return await mustPool(params.connection).explain(params.sql);
+      }
+      case 'scriptAnalyze': {
+        const r = splitStatements(params.script, params.dialect ?? 'mysql');
+        return { ...r, summary: summarize(r.statements), scriptNo: extractScriptNo(params.script) };
+      }
+      // 脚本执行仅由 service 在人工批准后调用（与 exec 同侧边界）
+      case 'scriptRun': {
+        const handle = pools.get(params.connection);
+        if (!handle) {
+          const reason = unavailable.get(params.connection);
+          throw new EngineError(CODES.CONN, reason
+            ? `连接 "${params.connection}" 配置失败：${reason}`
+            : `未配置的连接 "${params.connection}"——请在插件设置中配置后重试`);
+        }
+        const dialect = dialectOfUrl(handle.url);
+        const { statements } = splitStatements(params.script, dialect);
+        if (statements.length === 0) return { ok: true, total: 0, executed: 0, results: [], durationMs: 0 };
+        const priv = statements.find((s) => s.cls === 'priv');
+        if (priv) {
+          throw new EngineError(CODES.VALIDATION, `第 ${priv.idx} 条为 GRANT/REVOKE——脚本通道不支持权限管理语句（DBA 域）`);
+        }
+        const onError = params.onError === 'continue' ? 'continue' : 'abort';
+        const timeoutMs = Number.isFinite(params.scriptTimeoutMs) ? params.scriptTimeoutMs : 600_000;
+        const started = Date.now();
+        const session = await handle.pool.openSession();
+        const results = [];
+        let failedAtIndex = null;
+        let failure = null;
+        try {
+          for (const s of statements) {
+            if (Date.now() - started > timeoutMs) {
+              failure = { code: 'script_timeout', message: `整脚本超时（${Math.round(timeoutMs / 1000)}s）——已中止`, line: s.line };
+              break;
+            }
+            try {
+              const r = await session.exec(s.text);
+              results.push({ idx: s.idx, line: s.line, status: 'ok', affectedRows: r.affectedRows ?? 0 });
+            } catch (err) {
+              results.push({ idx: s.idx, line: s.line, status: 'failed', error: err instanceof Error ? err.message : String(err) });
+              if (failedAtIndex === null) {
+                failedAtIndex = s.idx;
+                failure = { code: err?.code ?? 'driver_error', message: err instanceof Error ? err.message : String(err), line: s.line };
+              }
+              if (onError === 'abort') break;
+            }
+          }
+          await session.finish(failure === null);
+        } finally {
+          await session.close();
+        }
+        return {
+          ok: failure === null,
+          total: statements.length,
+          executed: results.length,
+          results,
+          ...(failedAtIndex !== null ? { failedAtIndex } : {}),
+          ...(failure !== null ? { error: failure } : {}),
+          durationMs: Date.now() - started,
+        };
       }
       // exec 仅由 service 在人工批准后调用（spec §6.2：引擎协议不暴露给 agent）
       case 'exec': return await mustPool(params.connection).exec(params.sql);

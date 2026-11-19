@@ -109,3 +109,85 @@ describe('applyConfigure 逐连接隔离（终审 I2）', () => {
       .rejects.toMatchObject({ code: 'connection_failed' });
   });
 });
+
+// 脚本执行 op（spec 2026-11-19 §5.3）：fake 驱动注入会话契约。
+describe('scriptAnalyze / scriptRun（fake driver）', () => {
+  function fakeSessionDriver() {
+    const execLog = [];
+    return {
+      execLog,
+      async createPool(url) {
+        return {
+          url,
+          async ping() {},
+          async close() {},
+          async openSession() {
+            return {
+              async exec(sql) {
+                execLog.push(sql);
+                if (sql.includes('BOOM')) throw new Error('boom');
+                return { affectedRows: 1 };
+              },
+              async finish(ok) { execLog.push(ok ? 'finish:ok' : 'finish:fail'); },
+              async close() { execLog.push('close'); },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  async function setup() {
+    const fake = fakeSessionDriver();
+    const pools = new Map();
+    const d = createDispatcher(() => fake, pools);
+    await d.dispatch('configure', { connections: [{ name: 't', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000 }] });
+    return { d, fake };
+  }
+
+  it('scriptAnalyze 返回语句清单/摘要/脚本号，不触碰连接', async () => {
+    const { d, fake } = await setup();
+    const r = await d.dispatch('scriptAnalyze', { script: "SET @__script_no = 'X1';\nINSERT INTO a VALUES (1);", dialect: 'mysql' });
+    expect(r.statements).toHaveLength(2);
+    expect(r.scriptNo).toBe('X1');
+    expect(r.summary.counts).toEqual({ session: 1, insert: 1 });
+    expect(fake.execLog).toEqual([]);
+  });
+
+  it('scriptRun 顺序执行、收尾 ok、关闭会话', async () => {
+    const { d, fake } = await setup();
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT 1; SELECT 2;', onError: 'abort' });
+    expect(r.ok).toBe(true);
+    expect(r.executed).toBe(2);
+    expect(fake.execLog).toEqual(['SELECT 1', 'SELECT 2', 'finish:ok', 'close']);
+  });
+
+  it('abort 失败即停并定位', async () => {
+    const { d, fake } = await setup();
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT 1; SELECT BOOM; SELECT 3;', onError: 'abort' });
+    expect(r.ok).toBe(false);
+    expect(r.failedAtIndex).toBe(2);
+    expect(r.executed).toBe(2);
+    expect(fake.execLog).toEqual(['SELECT 1', 'SELECT BOOM', 'finish:fail', 'close']);
+  });
+
+  it('continue 采集全部错误', async () => {
+    const { d } = await setup();
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT BOOM; SELECT 1;', onError: 'continue' });
+    expect(r.ok).toBe(false);
+    expect(r.results.filter((x) => x.status === 'failed')).toHaveLength(1);
+    expect(r.executed).toBe(2);
+  });
+
+  it('GRANT 语句在预检即拒', async () => {
+    const { d } = await setup();
+    await expect(d.dispatch('scriptRun', { connection: 't', script: 'GRANT SELECT ON a TO b;', onError: 'abort' }))
+      .rejects.toThrow(/GRANT|REVOKE/);
+  });
+
+  it('未配置连接 → 人话错误', async () => {
+    const { d } = await setup();
+    await expect(d.dispatch('scriptRun', { connection: 'nope', script: 'SELECT 1;' }))
+      .rejects.toThrow(/未配置的连接/);
+  });
+});
