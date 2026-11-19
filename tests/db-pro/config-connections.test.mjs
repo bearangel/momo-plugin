@@ -79,3 +79,12 @@ describe('sanitizeScriptTimeoutMs', () => {
     expect(sanitizeScriptTimeoutMs(99_999_999)).toBe(3_600_000);
   });
 });
+
+// 权限进入 diff（spec 2026-11-19 §6.4）：权限变化必须触发引擎重配置。
+describe('diffConnections 含权限', () => {
+  it('权限变化 → true；相同 → false', () => {
+    const a = [{ name: 'a', url: 'mysql://u:p@h/d', queryTimeoutMs: 30000, permissions: ['query'] }];
+    expect(diffConnections(a, [{ name: 'a', url: 'mysql://u:p@h/d', queryTimeoutMs: 30000, permissions: ['query', 'insert'] }])).toBe(true);
+    expect(diffConnections(a, [{ name: 'a', url: 'mysql://u:p@h/d', queryTimeoutMs: 30000, permissions: ['query'] }])).toBe(false);
+  });
+});
