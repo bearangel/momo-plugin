@@ -28,6 +28,15 @@ agent 工具 plugin:db-pro/*（薄壳）
 - **MySQL `LOAD_FILE()` 等服务端文件读取函数过只读校验**：读取范围受数据库账号 FILE 权限约束——连接凭据即信任边界，属接受的风险；不允许的账号自然被数据库拒绝。
 - **引擎依赖系统 node**：无 node 的机器上插件不可用（日志可见 spawn ENOENT 退避重试）；vendor node 兜底在分发阶段引入（spike RESULT.md L3）。
 
+## 脚本执行通道（script_execute）
+
+- 支持一次提交多语句脚本（MySQL `DELIMITER`、PG 美元引用、Oracle/DM PL/SQL 块与 `/`）。
+- 流程：`script_execute` → 用户在「人工请求」面板批准 → 后台执行 → `script_status` 轮询。
+- `dryrun: true` 只做静态分析（语句清单/目标表/分类计数），不连库不审批。
+- 幂等/留痕由脚本自身实现；工具只记录通用执行历史（`script_history`）。
+- 限额：脚本 ≤ 2MB、语句 ≤ 10000、整脚本超时缺省 600s（`script_timeout_ms`）。
+- 不支持：`GRANT`/`REVOKE`（DBA 域）、SQL*Plus 控制流指令（`EXIT`/`WHENEVER`/`@file`）、psql 元命令。
+
 ## 测试
 
 ```bash
