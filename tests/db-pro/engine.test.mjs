@@ -191,3 +191,64 @@ describe('scriptAnalyze / scriptRun（fake driver）', () => {
       .rejects.toThrow(/未配置的连接/);
   });
 });
+
+// 逐连接权限 enforcement（spec 2026-11-19 §6.4）：配置态闸。
+describe('权限 enforcement（配置态闸）', () => {
+  async function setup(permissions) {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }), new Map());
+    await d.dispatch('configure', {
+      connections: [{ name: 'ro', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000, ...(permissions ? { permissions } : {}) }],
+    });
+    return d;
+  }
+
+  it('只读连接：query 放行、exec 拒（未授权 insert）', async () => {
+    const d = await setup(['query']);
+    const q = await d.dispatch('query', { connection: 'ro', sql: 'SELECT 1', maxRows: 5 });
+    expect(q.rows).toEqual([[1]]);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'INSERT INTO t VALUES (1)' }))
+      .rejects.toThrow(/insert/);
+  });
+
+  it('读写连接：insert 放行、DDL 拒（未授权 ddl_table）', async () => {
+    const d = await setup(['query', 'insert', 'update', 'delete']);
+    const r = await d.dispatch('exec', { connection: 'ro', sql: 'INSERT INTO t VALUES (1)' });
+    expect(r.affectedRows).toBe(1);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'DROP TABLE t' })).rejects.toThrow(/ddl_table/);
+  });
+
+  it('缺省 permissions（A 期老配置）→ 全权放行（兼容）', async () => {
+    const d = await setup(undefined);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'DROP TABLE t' })).resolves.toBeTruthy();
+  });
+
+  it('exec 对 GRANT 直接拒', async () => {
+    const d = await setup(undefined);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'GRANT SELECT ON a TO b' })).rejects.toThrow(/GRANT|权限管理/);
+  });
+
+  it('scriptRun：无 script 位即拒；逐条分类缺位定位到语句', async () => {
+    const ro = await setup(['query']);
+    await expect(ro.dispatch('scriptRun', { connection: 'ro', script: 'SELECT 1;' })).rejects.toThrow(/script/);
+    const rw = await setup(['query', 'script']);
+    await expect(rw.dispatch('scriptRun', { connection: 'ro', script: 'SELECT 1;\nDROP TABLE t;' }))
+      .rejects.toThrow(/第 2 条.*ddl_table/);
+  });
+
+  it('probe：临时建池 ping 后关闭（不污染池）', async () => {
+    const closed = [];
+    const pools = new Map();
+    const d = createDispatcher(() => ({
+      createPool: async () => ({ async ping() {}, async close() { closed.push(1); } }),
+    }), pools);
+    await expect(d.dispatch('probe', { url: 'mysql://u:p@h/d' })).resolves.toEqual({ ok: true });
+    expect(closed).toHaveLength(1);
+    expect(pools.size).toBe(0);
+  });
+
+  it('probe 不支持的协议 → 人话错误', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => ({ async ping() {}, async close() {} }) }), new Map());
+    await expect(d.dispatch('probe', { url: 'sqlite://x' })).rejects.toThrow(/不支持的连接协议/);
+  });
+});

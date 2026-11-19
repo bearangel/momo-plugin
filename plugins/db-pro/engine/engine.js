@@ -3,7 +3,8 @@
 // 协议：NDJSON JSON-RPC（protocol.js）；驱动懒加载（缺方言不拖垮其他连接）。
 const { runServer, EngineError, CODES } = require('./protocol');
 const { assertReadOnly } = require('./sql-validator');
-const { splitStatements, summarize, extractScriptNo } = require('./script-splitter');
+const { splitStatements, summarize, extractScriptNo, classifyStatement } = require('./script-splitter');
+const { LEGACY_FULL, hasBit, missingBits, requiredBitsForClass } = require('./permissions');
 
 const DIALECT_LOADERS = {
   mysql: () => require('./drivers/mysql'),
@@ -39,7 +40,8 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
     // 关闭：不在新配置、或 url/timeout 变化的
     for (const [name, h] of pools) {
       const n = next.get(name);
-      if (!n || n.url !== h.url || n.queryTimeoutMs !== h.queryTimeoutMs) {
+      const permsSame = n && JSON.stringify(h.permissions) === JSON.stringify(n.permissions ?? LEGACY_FULL);
+      if (!n || n.url !== h.url || n.queryTimeoutMs !== h.queryTimeoutMs || !permsSame) {
         pools.delete(name);
         void h.pool.close().catch(() => undefined);
       }
@@ -47,7 +49,8 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
     // 新建：逐连接 try/catch（终审 I2）——坏槽记 unavailable 不炸整批 configure
     for (const c of connections ?? []) {
       const cur = pools.get(c.name);
-      if (cur && cur.url === c.url && cur.queryTimeoutMs === c.queryTimeoutMs) continue;
+      if (cur && cur.url === c.url && cur.queryTimeoutMs === c.queryTimeoutMs
+        && JSON.stringify(cur.permissions) === JSON.stringify(c.permissions ?? LEGACY_FULL)) continue;
       pools.delete(c.name);
       unavailable.delete(c.name);
       try {
@@ -55,12 +58,48 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         const loader = DIALECT_LOADERS[proto];
         if (!loader) throw new EngineError(CODES.CONN, `不支持的连接协议 "${proto}://"（支持 mysql/postgres/oracle/dm）`);
         const pool = await loadDriver(proto).createPool(c.url, { queryTimeoutMs: c.queryTimeoutMs });
-        pools.set(c.name, { name: c.name, url: c.url, queryTimeoutMs: c.queryTimeoutMs, pool });
+        pools.set(c.name, {
+          name: c.name,
+          url: c.url,
+          queryTimeoutMs: c.queryTimeoutMs,
+          permissions: Array.isArray(c.permissions) ? c.permissions : LEGACY_FULL,
+          pool,
+        });
       } catch (err) {
         unavailable.set(c.name, err instanceof Error ? err.message : String(err));
       }
     }
     return { configured: pools.size, unavailable: [...unavailable.entries()].map(([name, reason]) => ({ name, reason })) };
+  }
+
+  function permsOf(name) {
+    const h = pools.get(name);
+    return h ? h.permissions : LEGACY_FULL;
+  }
+
+  function assertPerm(name, cls) {
+    const missing = requiredBitsForClass(cls).filter((b) => !hasBit(permsOf(name), b));
+    if (missing.length > 0) {
+      throw new EngineError(
+        CODES.VALIDATION,
+        `连接 "${name}" 未授权 ${missing.join('/')} 操作——请在插件面板「数据库」中调整该连接权限`,
+      );
+    }
+  }
+
+  function assertScriptPerm(name, statements) {
+    if (!hasBit(permsOf(name), 'script')) {
+      throw new EngineError(CODES.VALIDATION, `连接 "${name}" 未授权 script（脚本执行）——请在插件面板「数据库」中开启该权限`);
+    }
+    for (const s of statements) {
+      const missing = missingBits(permsOf(name), s.cls);
+      if (missing.length > 0) {
+        throw new EngineError(
+          CODES.VALIDATION,
+          `第 ${s.idx} 条（第 ${s.line} 行）需要 ${missing.join('/')} 权限——连接 "${name}" 未授权`,
+        );
+      }
+    }
   }
 
   async function dispatch(method, params) {
@@ -72,19 +111,21 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         await mustPool(params.name).ping();
         return { ok: true };
       case 'query': {
+        assertPerm(params.connection, 'read');
         const check = assertReadOnly(params.sql);
         if (!check.ok) throw new EngineError(CODES.VALIDATION, check.reason);
         return await mustPool(params.connection).query(params.sql, params.maxRows ?? 200);
       }
-      case 'meta.listSchemas': return { schemas: await mustPool(params.connection).listSchemas() };
-      case 'meta.listTables': return { tables: await mustPool(params.connection).listTables(params.schema) };
-      case 'meta.listViews': return { views: await mustPool(params.connection).listViews(params.schema) };
-      case 'meta.describe': return await mustPool(params.connection).describe(params.schema, params.table);
-      case 'meta.columns': return { columns: await mustPool(params.connection).columns(params.schema, params.table) };
-      case 'meta.ddl': return { ddl: await mustPool(params.connection).ddl(params.schema, params.table) };
+      case 'meta.listSchemas': assertPerm(params.connection, 'read'); return { schemas: await mustPool(params.connection).listSchemas() };
+      case 'meta.listTables': assertPerm(params.connection, 'read'); return { tables: await mustPool(params.connection).listTables(params.schema) };
+      case 'meta.listViews': assertPerm(params.connection, 'read'); return { views: await mustPool(params.connection).listViews(params.schema) };
+      case 'meta.describe': assertPerm(params.connection, 'read'); return await mustPool(params.connection).describe(params.schema, params.table);
+      case 'meta.columns': assertPerm(params.connection, 'read'); return { columns: await mustPool(params.connection).columns(params.schema, params.table) };
+      case 'meta.ddl': assertPerm(params.connection, 'read'); return { ddl: await mustPool(params.connection).ddl(params.schema, params.table) };
       // explain 前置只读校验（终审 C2）：EXPLAIN ANALYZE 在 PG 会真实执行所附
       // 语句——写语句走 explain 与走 query 同样必须被拦（首词白名单天然拒 ANALYZE/DML）
       case 'explain': {
+        assertPerm(params.connection, 'read');
         const explainCheck = assertReadOnly(params.sql);
         if (!explainCheck.ok) throw new EngineError(CODES.VALIDATION, explainCheck.reason);
         return await mustPool(params.connection).explain(params.sql);
@@ -109,6 +150,7 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         if (priv) {
           throw new EngineError(CODES.VALIDATION, `第 ${priv.idx} 条为 GRANT/REVOKE——脚本通道不支持权限管理语句（DBA 域）`);
         }
+        assertScriptPerm(params.connection, statements);
         const onError = params.onError === 'continue' ? 'continue' : 'abort';
         const timeoutMs = Number.isFinite(params.scriptTimeoutMs) ? params.scriptTimeoutMs : 600_000;
         const started = Date.now();
@@ -149,7 +191,22 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         };
       }
       // exec 仅由 service 在人工批准后调用（spec §6.2：引擎协议不暴露给 agent）
-      case 'exec': return await mustPool(params.connection).exec(params.sql);
+      case 'exec': {
+        const cls = classifyStatement(params.sql).cls;
+        if (cls === 'priv') {
+          throw new EngineError(CODES.VALIDATION, '不支持 GRANT/REVOKE 等权限管理语句（DBA 域）');
+        }
+        assertPerm(params.connection, cls);
+        return await mustPool(params.connection).exec(params.sql);
+      }
+      case 'probe': {
+        const proto = new URL(params.url).protocol.replace(':', '');
+        const loader = DIALECT_LOADERS[proto];
+        if (!loader) throw new EngineError(CODES.CONN, `不支持的连接协议 "${proto}://"（支持 mysql/postgres/oracle/dm）`);
+        const tmp = await loadDriver(proto).createPool(params.url, { queryTimeoutMs: params.queryTimeoutMs ?? 30_000 });
+        try { await tmp.ping(); } finally { await tmp.close().catch(() => undefined); }
+        return { ok: true };
+      }
       default: throw new EngineError(CODES.UNKNOWN_METHOD, `未知方法: ${method}`);
     }
   }
