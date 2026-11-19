@@ -24,7 +24,12 @@ function qi(v) {
 
 async function createPool(connUrl, opts = {}) {
   const timeoutMs = opts.queryTimeoutMs ?? 30_000;
-  const pool = new Pool({ connectionString: connUrl, max: 4, statement_timeout: timeoutMs });
+  const pool = new Pool({
+    connectionString: connUrl,
+    max: 4,
+    statement_timeout: timeoutMs,
+    connectionTimeoutMillis: opts.connectTimeoutMs ?? 10_000,
+  });
 
   async function run(sql, values, maxRows) {
     const res = await pool.query({ text: sql, values: values ?? [], rowMode: 'array' });
@@ -111,6 +116,17 @@ async function createPool(connUrl, opts = {}) {
     async exec(sql) {
       const res = await pool.query({ text: sql, values: [] });
       return { affectedRows: res.rowCount ?? 0 };
+    },
+    async openSession() {
+      const client = await pool.connect();
+      return {
+        async exec(sql) {
+          const res = await client.query({ text: sql, values: [] });
+          return { affectedRows: res.rowCount ?? 0 };
+        },
+        async finish() {},
+        async close() { client.release(); },
+      };
     },
     async close() {
       await pool.end();

@@ -149,6 +149,20 @@ async function createPool(connUrl, opts = {}) {
         return { affectedRows: res.rowsAffected ?? 0 };
       });
     },
+    async openSession() {
+      const conn = await pool.getConnection();
+      conn.callTimeout = timeoutMs;
+      return {
+        async exec(sql) {
+          const res = await conn.execute(sql, {}, { autoCommit: false });
+          return { affectedRows: res.rowsAffected ?? 0 };
+        },
+        async finish(ok) {
+          try { if (ok) await conn.commit(); else await conn.rollback(); } catch { /* 收尾失败不掩盖主结果 */ }
+        },
+        async close() { try { await conn.close(); } catch { /* 已失效 */ } },
+      };
+    },
     async close() {
       await pool.close();
     },

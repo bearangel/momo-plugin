@@ -109,3 +109,146 @@ describe('applyConfigure 逐连接隔离（终审 I2）', () => {
       .rejects.toMatchObject({ code: 'connection_failed' });
   });
 });
+
+// 脚本执行 op（spec 2026-11-19 §5.3）：fake 驱动注入会话契约。
+describe('scriptAnalyze / scriptRun（fake driver）', () => {
+  function fakeSessionDriver() {
+    const execLog = [];
+    return {
+      execLog,
+      async createPool(url) {
+        return {
+          url,
+          async ping() {},
+          async close() {},
+          async openSession() {
+            return {
+              async exec(sql) {
+                execLog.push(sql);
+                if (sql.includes('BOOM')) throw new Error('boom');
+                return { affectedRows: 1 };
+              },
+              async finish(ok) { execLog.push(ok ? 'finish:ok' : 'finish:fail'); },
+              async close() { execLog.push('close'); },
+            };
+          },
+        };
+      },
+    };
+  }
+
+  async function setup() {
+    const fake = fakeSessionDriver();
+    const pools = new Map();
+    const d = createDispatcher(() => fake, pools);
+    await d.dispatch('configure', { connections: [{ name: 't', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000 }] });
+    return { d, fake };
+  }
+
+  it('scriptAnalyze 返回语句清单/摘要/脚本号，不触碰连接', async () => {
+    const { d, fake } = await setup();
+    const r = await d.dispatch('scriptAnalyze', { script: "SET @__script_no = 'X1';\nINSERT INTO a VALUES (1);", dialect: 'mysql' });
+    expect(r.statements).toHaveLength(2);
+    expect(r.scriptNo).toBe('X1');
+    expect(r.summary.counts).toEqual({ session: 1, insert: 1 });
+    expect(fake.execLog).toEqual([]);
+  });
+
+  it('scriptRun 顺序执行、收尾 ok、关闭会话', async () => {
+    const { d, fake } = await setup();
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT 1; SELECT 2;', onError: 'abort' });
+    expect(r.ok).toBe(true);
+    expect(r.executed).toBe(2);
+    expect(fake.execLog).toEqual(['SELECT 1', 'SELECT 2', 'finish:ok', 'close']);
+  });
+
+  it('abort 失败即停并定位', async () => {
+    const { d, fake } = await setup();
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT 1; SELECT BOOM; SELECT 3;', onError: 'abort' });
+    expect(r.ok).toBe(false);
+    expect(r.failedAtIndex).toBe(2);
+    expect(r.executed).toBe(2);
+    expect(fake.execLog).toEqual(['SELECT 1', 'SELECT BOOM', 'finish:fail', 'close']);
+  });
+
+  it('continue 采集全部错误', async () => {
+    const { d } = await setup();
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT BOOM; SELECT 1;', onError: 'continue' });
+    expect(r.ok).toBe(false);
+    expect(r.results.filter((x) => x.status === 'failed')).toHaveLength(1);
+    expect(r.executed).toBe(2);
+  });
+
+  it('GRANT 语句在预检即拒', async () => {
+    const { d } = await setup();
+    await expect(d.dispatch('scriptRun', { connection: 't', script: 'GRANT SELECT ON a TO b;', onError: 'abort' }))
+      .rejects.toThrow(/GRANT|REVOKE/);
+  });
+
+  it('未配置连接 → 人话错误', async () => {
+    const { d } = await setup();
+    await expect(d.dispatch('scriptRun', { connection: 'nope', script: 'SELECT 1;' }))
+      .rejects.toThrow(/未配置的连接/);
+  });
+});
+
+// 逐连接权限 enforcement（spec 2026-11-19 §6.4）：配置态闸。
+describe('权限 enforcement（配置态闸）', () => {
+  async function setup(permissions) {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }), new Map());
+    await d.dispatch('configure', {
+      connections: [{ name: 'ro', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000, ...(permissions ? { permissions } : {}) }],
+    });
+    return d;
+  }
+
+  it('只读连接：query 放行、exec 拒（未授权 insert）', async () => {
+    const d = await setup(['query']);
+    const q = await d.dispatch('query', { connection: 'ro', sql: 'SELECT 1', maxRows: 5 });
+    expect(q.rows).toEqual([[1]]);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'INSERT INTO t VALUES (1)' }))
+      .rejects.toThrow(/insert/);
+  });
+
+  it('读写连接：insert 放行、DDL 拒（未授权 ddl_table）', async () => {
+    const d = await setup(['query', 'insert', 'update', 'delete']);
+    const r = await d.dispatch('exec', { connection: 'ro', sql: 'INSERT INTO t VALUES (1)' });
+    expect(r.affectedRows).toBe(1);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'DROP TABLE t' })).rejects.toThrow(/ddl_table/);
+  });
+
+  it('缺省 permissions（A 期老配置）→ 全权放行（兼容）', async () => {
+    const d = await setup(undefined);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'DROP TABLE t' })).resolves.toBeTruthy();
+  });
+
+  it('exec 对 GRANT 直接拒', async () => {
+    const d = await setup(undefined);
+    await expect(d.dispatch('exec', { connection: 'ro', sql: 'GRANT SELECT ON a TO b' })).rejects.toThrow(/GRANT|权限管理/);
+  });
+
+  it('scriptRun：无 script 位即拒；逐条分类缺位定位到语句', async () => {
+    const ro = await setup(['query']);
+    await expect(ro.dispatch('scriptRun', { connection: 'ro', script: 'SELECT 1;' })).rejects.toThrow(/script/);
+    const rw = await setup(['query', 'script']);
+    await expect(rw.dispatch('scriptRun', { connection: 'ro', script: 'SELECT 1;\nDROP TABLE t;' }))
+      .rejects.toThrow(/第 2 条.*ddl_table/);
+  });
+
+  it('probe：临时建池 ping 后关闭（不污染池）', async () => {
+    const closed = [];
+    const pools = new Map();
+    const d = createDispatcher(() => ({
+      createPool: async () => ({ async ping() {}, async close() { closed.push(1); } }),
+    }), pools);
+    await expect(d.dispatch('probe', { url: 'mysql://u:p@h/d' })).resolves.toEqual({ ok: true });
+    expect(closed).toHaveLength(1);
+    expect(pools.size).toBe(0);
+  });
+
+  it('probe 不支持的协议 → 人话错误', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => ({ async ping() {}, async close() {} }) }), new Map());
+    await expect(d.dispatch('probe', { url: 'sqlite://x' })).rejects.toThrow(/不支持的连接协议/);
+  });
+});

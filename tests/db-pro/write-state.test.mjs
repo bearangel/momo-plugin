@@ -120,3 +120,40 @@ describe('write.status（两段式全转移）', () => {
     expect(await h.state.status({ requestId: 'bad' })).toEqual({ status: 'invalid_payload' });
   });
 });
+
+// 审批前权限预检（spec 2026-11-19 §6.4）：只读连接不得建写卡（配置态闸先于人工门）。
+describe('write.request 权限预检', () => {
+  function mkPermHarness(perms) {
+    const humanGate = { create: vi.fn(async () => 'req-x'), status: vi.fn(async () => null) };
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbpro-wp-'));
+    const state = createWriteState({
+      humanGate: () => humanGate,
+      execSql: vi.fn(async () => ({ affectedRows: 1 })),
+      dataDir,
+      log: () => undefined,
+      permissionsOf: async () => perms,
+    });
+    return { state, humanGate };
+  }
+  it('只读连接：DML 在审批前被拒（不建卡）', async () => {
+    const { state, humanGate } = mkPermHarness(['query']);
+    await expect(state.request({ connection: 'ro', sql: 'INSERT INTO t VALUES (1)', sessionId: 's' }))
+      .rejects.toThrow(/insert/);
+    expect(humanGate.create).not.toHaveBeenCalled();
+  });
+  it('只读连接：DDL 在审批前被拒', async () => {
+    const { state } = mkPermHarness(['query', 'insert', 'update', 'delete']);
+    await expect(state.request({ connection: 'ro', sql: 'DROP TABLE t', sessionId: 's' })).rejects.toThrow(/ddl_table/);
+  });
+  it('权限齐 → 正常建卡', async () => {
+    const { state, humanGate } = mkPermHarness(['query', 'insert']);
+    const r = await state.request({ connection: 'rw', sql: 'INSERT INTO t VALUES (1)', sessionId: 's' });
+    expect(r.status).toBe('pending');
+    expect(humanGate.create).toHaveBeenCalledTimes(1);
+  });
+  it('缺省 permissionsOf（A 期老行为）→ 全权放行', async () => {
+    const h = mkHarness();
+    const r = await h.state.request({ connection: 'c', sql: 'INSERT INTO t VALUES (1)', sessionId: 's' });
+    expect(r.status).toBe('pending');
+  });
+});

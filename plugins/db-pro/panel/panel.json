@@ -1,0 +1,5 @@
+{
+  "panels": [
+    { "id": "connections", "title": "数据库", "icon": "lucide:database", "location": "page", "entry": "./index.html" }
+  ]
+}

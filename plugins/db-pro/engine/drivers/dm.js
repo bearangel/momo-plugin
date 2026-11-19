@@ -151,10 +151,34 @@ async function createPool(connUrl, opts = {}) {
         return { affectedRows: res.rowsAffected ?? 0 };
       });
     },
+    async openSession() {
+      const conn = await pool.getConnection();
+      return {
+        async exec(sql) {
+          const res = await conn.execute(sql, {}, { autoCommit: false });
+          return { affectedRows: res.rowsAffected ?? 0 };
+        },
+        async finish(ok) {
+          try { if (ok) await conn.commit(); else await conn.rollback(); } catch { /* 收尾失败不掩盖主结果 */ }
+        },
+        async close() { try { await conn.close(); } catch { /* 已失效 */ } },
+      };
+    },
     async close() {
       await pool.close();
     },
   };
 }
 
-module.exports = { createPool, parseUrl, parseExplainPlan };
+/** 直连探测（不入池）：dmdb 池别名 = 连接串，同别名重复建池报 [20006] —— 测试连接走直连 */
+async function probeUrl(url) {
+  const conn = await dmdb.getConnection(url);
+  try {
+    await conn.execute('SELECT 1');
+  } finally {
+    await conn.close().catch(() => undefined);
+  }
+  return true;
+}
+
+module.exports = { createPool, parseUrl, parseExplainPlan, probeUrl };

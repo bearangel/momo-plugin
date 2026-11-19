@@ -5,8 +5,10 @@
 //（Electron 内嵌 Node 无该开关——L1 实测 bad option）；分发兜底 L3 见 RESULT.md。
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, validateWriteConnection } = require('./config-connections');
+const { diffConnections, sanitizeTimeoutMs, sanitizeScriptTimeoutMs, validateWriteConnection } = require('./config-connections');
+const { createConnectionsStore } = require('./connections-store');
 const { createWriteState } = require('./write-state');
+const { createScriptState } = require('./script-state');
 const { isFatalSpawnError } = require('./spawn-diag');
 
 const ENGINE_BOOT_TIMEOUT_MS = 8_000;
@@ -36,6 +38,45 @@ function createService(ctx) {
     },
     execSql: (connection, sql) => rpc('exec', { connection, sql }),
     dataDir: ctx.getDataDir(),
+    log: (msg, meta) => ctx.logger.warn(msg, meta),
+    permissionsOf: async (name) => {
+      const rows = await store.listForEngine().catch(() => []);
+      const hit = rows.find((r) => r.name === name);
+      return hit ? hit.permissions : [];
+    },
+  });
+
+  const scriptState = createScriptState({
+    humanGate: () => {
+      if (!ctx.humanGate) throw new Error('宿主未注入 humanGate（需包含该扩展的 momo-studio 版本）');
+      return ctx.humanGate;
+    },
+    analyze: async (connection, script) => {
+      if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
+      return await rpc('scriptAnalyze', { script, dialect: dialectOfUrl(connection) }, 30_000);
+    },
+    run: async (payload) => {
+      if (!child) throw new Error('db-pro 引擎未就绪（脚本作业中止）');
+      const timeoutMs = sanitizeScriptTimeoutMs(ctx.getConfig().script_timeout_ms);
+      return await rpc('scriptRun', {
+        connection: payload.connection,
+        script: payload.script,
+        onError: payload.onError,
+        scriptTimeoutMs: timeoutMs,
+      }, timeoutMs + 5_000);
+    },
+    dataDir: ctx.getDataDir(),
+    log: (msg, meta) => ctx.logger.warn(msg, meta),
+    permissionsOf: async (name) => {
+      const rows = await store.listForEngine().catch(() => []);
+      const hit = rows.find((r) => r.name === name);
+      return hit ? hit.permissions : [];
+    },
+  });
+
+  const store = createConnectionsStore({
+    dataDir: ctx.getDataDir(),
+    secrets: ctx.secrets,
     log: (msg, meta) => ctx.logger.warn(msg, meta),
   });
 
@@ -145,26 +186,35 @@ function createService(ctx) {
     });
   }
 
-  // ── 配置 diff（每次调用兜底比对，spec §5.3）─────────────────
+  // ── 连接解析与配置 diff（spec 2026-11-19 §6.2）───────────────
+  async function computeConns() {
+    await store.warm();
+    const queryTimeoutMs = sanitizeTimeoutMs(ctx.getConfig().query_timeout_ms);
+    return (await store.listForEngine()).map((c) => ({ ...c, queryTimeoutMs }));
+  }
+
   async function ensureConfig() {
-    const conns = connectionsFromConfig(ctx.getConfig());
+    if (store.listProjection().length === 0) {
+      try {
+        const r = await store.migrateLegacy(ctx.getConfig());
+        if (r.migrated > 0) ctx.logger.info(`已从旧版配置迁移 ${r.migrated} 个数据库连接`);
+      } catch (err) {
+        ctx.logger.warn('旧版连接配置迁移失败（不阻塞）', { error: err.message });
+      }
+    }
+    const conns = await computeConns();
+    if (!child) {
+      // 引擎未就绪：先记真源，bootEngine 启动后按 lastConnections 下发
+      lastConnections = conns;
+      return;
+    }
     if (diffConnections(lastConnections, conns)) {
       // 先 configure 成功再提交 lastConnections（终审 I1）：失败时 diff 仍判变，
       // 下次调用即重试——不会把失败配置楔死到重启
       const r = await rpc('configure', { connections: conns }, ENGINE_BOOT_TIMEOUT_MS);
-      // I-6（复审）：回吐坏槽 unavailable——listConnections 按槽带 ok/reason，
-      // 不再单槽炸整表（dialectOf 同步加守卫）
       lastUnavailable = new Map((r.unavailable ?? []).map((u) => [u.name, u.reason]));
       lastConnections = conns;
     }
-  }
-
-  function defaultConnection() {
-    const cfg = ctx.getConfig();
-    const explicit = typeof cfg.default_connection === 'string' && cfg.default_connection.trim() !== ''
-      ? cfg.default_connection.trim() : '';
-    if (explicit) return explicit;
-    return lastConnections[0]?.name ?? '';
   }
 
   // I-6（复审）：URL 形态守卫——无 scheme 槽值（如裸 127.0.0.1）不炸整表
@@ -174,6 +224,21 @@ function createService(ctx) {
     } catch {
       return 'unknown';
     }
+  }
+
+  /** URL → host:port/db（不含凭据；错误文案用） */
+  function endpointOf(url) {
+    try {
+      const u = new URL(url);
+      return `${u.hostname}:${u.port || '?'}${u.pathname && u.pathname !== '/' ? u.pathname : ''}`;
+    } catch {
+      return '';
+    }
+  }
+
+  function dialectOfUrl(name) {
+    const conn = lastConnections.find((c) => c.name === name);
+    return conn ? dialectOf(conn.url) : 'mysql';
   }
 
   // 行数上限净化：负数 slice 会从尾部截（同类 -40 隐患）——非有限/<=0 归 200，封顶 10000
@@ -191,12 +256,68 @@ function createService(ctx) {
       return writeState.request(params);
     }
     if (method === 'writeStatus') return writeState.status(params);
+    if (method === 'scriptExecute') {
+      if (child) await ensureConfig();
+      if (typeof params.connection !== 'string' || params.connection === '') {
+        throw new Error('必须指定 connection（连接名）——请先 list_connections 查看可用连接');
+      }
+      validateWriteConnection(lastConnections, params.connection);
+      return scriptState.submit(params);
+    }
+    if (method === 'scriptStatus') return scriptState.status(params);
+    if (method === 'scriptHistory') return scriptState.history(params);
+    if (method === 'connectionsList') {
+      await store.warm();
+      return { connections: store.listProjection() };
+    }
+    if (method === 'connectionsCreate') {
+      await store.create(params);
+      await ensureConfig();
+      return { connections: store.listProjection() };
+    }
+    if (method === 'connectionsUpdate') {
+      await store.update(String(params.id), params.patch ?? params);
+      await ensureConfig();
+      return { connections: store.listProjection() };
+    }
+    if (method === 'connectionsRemove') {
+      await store.remove(String(params.id));
+      await ensureConfig();
+      return { connections: store.listProjection() };
+    }
+    if (method === 'connectionsTest') {
+      const url = typeof params.url === 'string' ? params.url.trim() : '';
+      const name = typeof params.name === 'string' ? params.name.trim() : '';
+      if (url === '' && name !== '') {
+        if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
+        await ensureConfig();
+        const rows = await store.listForEngine().catch(() => []);
+        const hit = rows.find((r) => r.name === name);
+        const endpoint = hit ? endpointOf(hit.url) : '';
+        try {
+          return await rpc('connTest', { name }, 20_000);
+        } catch (err) {
+          throw new Error(`连接 "${name}"${endpoint ? `（${endpoint}）` : ''} 测试失败：${err.message}`);
+        }
+      }
+      if (url === '') throw new Error('connectionsTest 须提供 name 或 url');
+      const timeoutMs = sanitizeTimeoutMs(ctx.getConfig().query_timeout_ms);
+      try {
+        return await rpc('probe', { url, queryTimeoutMs: timeoutMs }, 20_000);
+      } catch (err) {
+        throw new Error(`连接 ${endpointOf(url)} 探测失败：${err.message}`);
+      }
+    }
     if (method === 'listConnections') {
       if (child) await ensureConfig();
+      await store.warm();
       return {
-        connections: lastConnections.map((c) => {
+        connections: store.listProjection().map((c) => {
           const reason = lastUnavailable.get(c.name);
-          return { name: c.name, dialect: dialectOf(c.url), ok: reason === undefined, ...(reason !== undefined ? { reason } : {}) };
+          return {
+            name: c.name, description: c.description ?? '', dialect: c.dialect, permissions: c.permissions,
+            ok: reason === undefined, ...(reason !== undefined ? { reason } : {}),
+          };
         }),
       };
     }
@@ -204,7 +325,9 @@ function createService(ctx) {
       if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
       await ensureConfig();
       const p = { ...params };
-      if (!p.connection) p.connection = defaultConnection();
+      if (typeof p.connection !== 'string' || p.connection === '') {
+        throw new Error('必须指定 connection（连接名）——请先 list_connections 查看可用连接（名称与描述说明其用途）');
+      }
       if (method === 'query') {
         // M-A（复审）：rpc 超时随配置走（引擎侧超时 + 5s 余量，桥上限 60s 内）；
         // 超时/行数均过净化（负值归缺省——-40 实证：负超时直传致全量瞬时超时）
@@ -220,10 +343,9 @@ function createService(ctx) {
   return {
     async start() {
       try {
-        lastConnections = connectionsFromConfig(ctx.getConfig());
+        await ensureConfig();
       } catch (err) {
-        ctx.logger.warn('db-pro 配置解析失败（连接暂不可用，修配置后自动生效）', { error: err.message });
-        lastConnections = [];
+        ctx.logger.warn('db-pro 连接初始化失败（修配置后自动生效）', { error: err.message });
       }
       try {
         await bootEngine();

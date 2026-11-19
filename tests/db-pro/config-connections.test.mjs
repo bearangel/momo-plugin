@@ -66,3 +66,25 @@ describe('validateWriteConnection', () => {
     expect(() => validateWriteConnection([], 'x')).toThrow(/可用连接: （无）/);
   });
 });
+
+// 整脚本超时净化（spec 2026-11-19 §5.3）：缺省 600s，下限 10s，上限 3600s。
+import { sanitizeScriptTimeoutMs } from '../../plugins/db-pro/service/config-connections.js';
+describe('sanitizeScriptTimeoutMs', () => {
+  it('缺省/非法 → 600000；下限 10000；上限 3600000', () => {
+    expect(sanitizeScriptTimeoutMs(undefined)).toBe(600_000);
+    expect(sanitizeScriptTimeoutMs('abc')).toBe(600_000);
+    expect(sanitizeScriptTimeoutMs(-1)).toBe(600_000);
+    expect(sanitizeScriptTimeoutMs(5_000)).toBe(10_000);
+    expect(sanitizeScriptTimeoutMs(120_000)).toBe(120_000);
+    expect(sanitizeScriptTimeoutMs(99_999_999)).toBe(3_600_000);
+  });
+});
+
+// 权限进入 diff（spec 2026-11-19 §6.4）：权限变化必须触发引擎重配置。
+describe('diffConnections 含权限', () => {
+  it('权限变化 → true；相同 → false', () => {
+    const a = [{ name: 'a', url: 'mysql://u:p@h/d', queryTimeoutMs: 30000, permissions: ['query'] }];
+    expect(diffConnections(a, [{ name: 'a', url: 'mysql://u:p@h/d', queryTimeoutMs: 30000, permissions: ['query', 'insert'] }])).toBe(true);
+    expect(diffConnections(a, [{ name: 'a', url: 'mysql://u:p@h/d', queryTimeoutMs: 30000, permissions: ['query'] }])).toBe(false);
+  });
+});

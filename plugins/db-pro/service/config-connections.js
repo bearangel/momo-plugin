@@ -28,6 +28,13 @@ function connectionsFromConfig(config) {
   return conns;
 }
 
+/** 整脚本超时净化：非有限/负数 → 缺省 600s；下限 10s；上限 3600s */
+function sanitizeScriptTimeoutMs(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 600_000;
+  return Math.min(Math.max(n, 10_000), 3_600_000);
+}
+
 /** 有变化返回 true（按名比对 url/timeout；数量不等即变） */
 function diffConnections(prev, next) {
   if (prev.length !== next.length) return true;
@@ -35,6 +42,7 @@ function diffConnections(prev, next) {
   for (const n of next) {
     const p = byName.get(n.name);
     if (!p || p.url !== n.url || p.queryTimeoutMs !== n.queryTimeoutMs) return true;
+    if (JSON.stringify(p.permissions ?? null) !== JSON.stringify(n.permissions ?? null)) return true;
   }
   return false;
 }
@@ -44,8 +52,8 @@ function diffConnections(prev, next) {
 function validateWriteConnection(conns, name) {
   if (!conns.some((c) => c.name === name)) {
     const list = conns.map((c) => c.name).join(', ') || '（无）';
-    throw new Error(`未配置的连接 "${String(name)}"——可用连接: ${list}（list_connections 可查；未配置请在 设置 → 插件 → db-pro 添加）`);
+    throw new Error(`未配置的连接 "${String(name)}"——可用连接: ${list}（list_connections 可查；未配置请在插件「数据库」面板添加）`);
   }
 }
 
-module.exports = { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, validateWriteConnection, SLOT_COUNT };
+module.exports = { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, sanitizeScriptTimeoutMs, validateWriteConnection, SLOT_COUNT };

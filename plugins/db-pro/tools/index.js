@@ -9,7 +9,7 @@ const CALL_TIMEOUT_MS = 60_000; // 桥上限（spec §2 事实 1）
 const DEFS = [
   {
     name: 'list_connections',
-    description: '列出已配置的数据库连接（名称 + 类型，不含凭据）。查询前先调用此工具确认可用连接。',
+    description: '列出已配置的数据库连接（名称 / 类型 / 描述，不含凭据）。名称与描述说明该库用途——所有数据库操作都必须显式指定 connection。',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -17,8 +17,8 @@ const DEFS = [
     description: '列出指定数据库的 schema 清单。',
     inputSchema: {
       type: 'object',
-      properties: { connection: { type: 'string', description: '连接名（省略用缺省连接）' } },
-      required: [],
+      properties: { connection: { type: 'string', description: '连接名（必填）' } },
+      required: ['connection'],
     },
   },
   {
@@ -27,10 +27,10 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
       },
-      required: [],
+      required: ['connection'],
     },
   },
   {
@@ -39,10 +39,10 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
       },
-      required: [],
+      required: ['connection'],
     },
   },
   {
@@ -51,11 +51,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
         table: { type: 'string', description: '表名' },
       },
-      required: ['table'],
+      required: ['connection', 'table'],
     },
   },
   {
@@ -64,11 +64,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
         table: { type: 'string', description: '表名' },
       },
-      required: ['table'],
+      required: ['connection', 'table'],
     },
   },
   {
@@ -77,11 +77,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         schema: { type: 'string', description: 'schema（省略用连接缺省）' },
         table: { type: 'string', description: '表名' },
       },
-      required: ['table'],
+      required: ['connection', 'table'],
     },
   },
   {
@@ -90,11 +90,11 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         sql: { type: 'string', description: '只读 SQL 语句（单条）' },
         max_rows: { type: 'number', description: '本次返回行数上限（省略用全局配置，默认 200）' },
       },
-      required: ['sql'],
+      required: ['connection', 'sql'],
     },
   },
   {
@@ -103,10 +103,10 @@ const DEFS = [
     inputSchema: {
       type: 'object',
       properties: {
-        connection: { type: 'string', description: '连接名（省略用缺省连接）' },
+        connection: { type: 'string', description: '连接名（必填）' },
         sql: { type: 'string', description: '要分析的 SELECT 语句' },
       },
-      required: ['sql'],
+      required: ['connection', 'sql'],
     },
   },
   {
@@ -130,6 +130,41 @@ const DEFS = [
       required: ['requestId'],
     },
   },
+  {
+    name: 'script_execute',
+    description: '执行 SQL 脚本（多语句，支持 DELIMITER/存储过程/会话变量/事务）。不直接执行——创建脚本级人工批准请求；批准后脚本在后台运行。先调 script_status 轮询结果。可用 dryrun:true 只做静态分析（不连库不审批）。幂等由脚本自身保证，工具不重复判断。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connection: { type: 'string', description: '连接名（必填）' },
+        script: { type: 'string', description: '脚本全文（≤2MB、≤10000 条语句）' },
+        on_error: { type: 'string', enum: ['abort', 'continue'], description: '失败策略（省略 abort=失败即停）' },
+        dryrun: { type: 'boolean', description: 'true=只做静态分析并返回语句清单' },
+      },
+      required: ['connection', 'script'],
+    },
+  },
+  {
+    name: 'script_status',
+    description: '查询脚本执行状态：pending（待批准）/ denied / running（后台执行中）/ executed（含逐条摘要）/ exec_unknown（执行中断，勿重跑，先人工核查）/ not_found。',
+    inputSchema: {
+      type: 'object',
+      properties: { requestId: { type: 'string', description: 'script_execute 返回的请求 ID' } },
+      required: ['requestId'],
+    },
+  },
+  {
+    name: 'script_history',
+    description: '查询脚本执行历史（谁/何时/哪个库/脚本号/结果）。历史仅供参考——是否重复执行由脚本自身幂等逻辑决定。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        connection: { type: 'string', description: '按连接过滤（省略=全部）' },
+        limit: { type: 'number', description: '返回条数（缺省 20，上限 200）' },
+      },
+      required: [],
+    },
+  },
 ];
 
 const METHOD_OF = {
@@ -144,6 +179,9 @@ const METHOD_OF = {
   explain_query: 'explain',
   write: 'write',
   write_status: 'writeStatus',
+  script_execute: 'scriptExecute',
+  script_status: 'scriptStatus',
+  script_history: 'scriptHistory',
 };
 
 function render(name, res) {
@@ -174,12 +212,40 @@ function render(name, res) {
     if (res.status === 'pending') return '仍在等待用户批准。';
     return `请求状态: ${res.status}${res.note ? `（${res.note}）` : ''}`;
   }
+  if (name === 'script_execute') {
+    if (res.dryrun) {
+      const lines = (res.statements ?? []).map((s) => `${s.idx}. [${s.cls}] L${s.line} ${s.keyword}${s.tables?.length ? ` → ${s.tables.join(',')}` : ''}`);
+      return `静态分析（未执行）：${res.statements?.length ?? 0} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}\n${lines.join('\n')}`;
+    }
+    if (res.note) return `脚本${res.note}——未执行。`;
+    return `脚本执行请求已创建（requestId: ${res.requestId}，${res.summary?.statementCount ?? '?'} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}），等待用户批准。请提醒用户后调用 script_status 轮询——批准前不会执行任何语句。`;
+  }
+  if (name === 'script_status') {
+    if (res.status === 'pending') return '仍在等待用户批准脚本执行。';
+    if (res.status === 'denied') return `用户拒绝了脚本执行。${res.note ? `附言：${res.note}` : ''}`;
+    if (res.status === 'running') return '脚本正在后台执行，请稍候继续轮询。';
+    if (res.status === 'exec_unknown') return `执行结果未知（中断）：${res.note ?? ''}请人工核查数据库状态，勿直接重跑。`;
+    if (res.status === 'executed') {
+      const r = res.result ?? {};
+      const once = res.replayed ? '（本次返回缓存结果）' : '';
+      if (r.ok === false) {
+        return `脚本执行失败${once}：已执行 ${r.executed}/${r.total} 条；失败在第 ${r.failedAtIndex} 条（第 ${r.error?.line} 行）——${r.error?.message ?? ''}`;
+      }
+      return `脚本已执行${once}：${r.executed}/${r.total} 条语句成功，耗时 ${r.durationMs}ms。`;
+    }
+    return `状态: ${res.status}${res.note ? `（${res.note}）` : ''}`;
+  }
+  if (name === 'script_history') {
+    if (!res.entries?.length) return '（暂无脚本执行历史）';
+    return res.entries.map((e) => `- ${new Date(e.at).toISOString()} ${e.connection} ${e.scriptNo ?? '-'} ${e.result}${e.failedAtIndex ? ` @第${e.failedAtIndex}条` : ''}${e.errorSummary ? `（${e.errorSummary}）` : ''}`).join('\n');
+  }
   if (name === 'list_connections') {
     return res.connections.length === 0
-      ? '（未配置连接——请在 设置 → 插件 → db-pro 配置连接串）'
+      ? '（未配置连接——请在插件「数据库」面板添加）'
       : res.connections.map((c) => {
-          if (c.ok === false) return `- ${c.name}（${c.dialect}，⚠ 配置失败：${c.reason}）`;
-          return `- ${c.name}（${c.dialect}）`;
+          const desc = c.description ? ` · ${c.description}` : '';
+          if (c.ok === false) return `- ${c.name}（${c.dialect}${desc}，⚠ 配置失败：${c.reason}）`;
+          return `- ${c.name}（${c.dialect}${desc}）`;
         }).join('\n');
   }
   if (name === 'get_ddl') return res.ddl;
@@ -205,6 +271,7 @@ function createTools(ctx) {
       // 人工请求面板也按房间挂载——streamSessionId 是流 ID 非 sessions 行（验收 P0 实证）
       const mapped = { ...args };
       if (mapped.max_rows !== undefined) mapped.maxRows = mapped.max_rows; // M-C：spec 命名 → service 契约
+      if (mapped.on_error !== undefined) mapped.onError = mapped.on_error;
       const res = await ctx.callService(
         method,
         { ...mapped, sessionId: toolCtx.roomId, taskId: toolCtx.taskId ?? null },

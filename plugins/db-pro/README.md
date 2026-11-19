@@ -6,11 +6,28 @@ agent 可查询 MySQL / PostgreSQL / Oracle（12c+ thin）/ 达梦 DM8：**只�
 
 momo-studio → 设置 → 插件 → 开发目录安装 → 选本目录。依赖：本目录内 `npm install`（Node 24）。
 
-## 配置（设置 → 插件 → db-pro）
+## 配置（插件「数据库」面板）
 
-- 槽位 `conn1`-`conn6`：URL（敏感，入 keytar）+ 可选名称。格式：
-  `mysql://user:pass@host:3306/db` · `postgres://user:pass@host:5432/db` · `oracle://user:pass@host:1521/服务名`（Oracle 11g 不支持） · `dm://user:pass@host:5236`
-- `default_connection` / `readonly_max_rows`（200）/ `query_timeout_ms`（30000）
+连接在插件自带面板管理（侧栏连接列表 + 右侧编辑）：名称、描述、连接 URL、逐连接权限。
+**无「缺省连接」**：agent 每次操作必须显式指定 `connection`；名称与描述用于说明该库用途（`list_connections` 会带出描述）。
+格式：`mysql://user:pass@host:3306/db` · `postgres://user:pass@host:5432/db` · `oracle://user:pass@host:1521/服务名`（Oracle 11g 不支持） · `dm://user:pass@host:5236`。
+URL 明文只入 keytar，面板与工具均不回显密码。旧版设置页 `conn1`–`conn6` 配置在首次启动时自动迁移（保等效全权限，旧密钥清除）。
+
+**权限位（8 位，配置态闸；人工批准照旧）**
+
+| 权限位 | 覆盖 |
+|---|---|
+| `query` | SELECT / SHOW / DESC / EXPLAIN / WITH（含结构读） |
+| `insert` / `update` / `delete` | DML 三项（MERGE 需三项齐） |
+| `ddl_table` | CREATE / DROP / ALTER / TRUNCATE TABLE |
+| `ddl_other` | VIEW / INDEX / SEQUENCE / TRIGGER |
+| `procedure` | CREATE / DROP / ALTER PROCEDURE / FUNCTION / PACKAGE + CALL |
+| `script` | 脚本执行通道 |
+
+预设档：只读 `{query}` · 读写 `{query,insert,update,delete}` · 全权（8 位） · 自定义。
+权限与人工批准双闸独立：缺位直接拒绝（配置态），位齐后写/脚本仍走人工批准（运行态）。
+
+**设置页（仅插件级参数）**：`readonly_max_rows`（200）/ `query_timeout_ms`（30000）/ `script_timeout_ms`（600000）
 
 ## 架构速览
 
@@ -27,6 +44,15 @@ agent 工具 plugin:db-pro/*（薄壳）
 - **达梦连接 `query_timeout_ms` 不生效**：dmdb 无池级/语句级超时注入点——查询时长仅受 service 桥 30s 上限约束（超时后引擎侧查询可能仍在跑占用连接）。后续版本在 dm 驱动层做超时取消。
 - **MySQL `LOAD_FILE()` 等服务端文件读取函数过只读校验**：读取范围受数据库账号 FILE 权限约束——连接凭据即信任边界，属接受的风险；不允许的账号自然被数据库拒绝。
 - **引擎依赖系统 node**：无 node 的机器上插件不可用（日志可见 spawn ENOENT 退避重试）；vendor node 兜底在分发阶段引入（spike RESULT.md L3）。
+
+## 脚本执行通道（script_execute）
+
+- 支持一次提交多语句脚本（MySQL `DELIMITER`、PG 美元引用、Oracle/DM PL/SQL 块与 `/`）。
+- 流程：`script_execute` → 用户在「人工请求」面板批准 → 后台执行 → `script_status` 轮询。
+- `dryrun: true` 只做静态分析（语句清单/目标表/分类计数），不连库不审批。
+- 幂等/留痕由脚本自身实现；工具只记录通用执行历史（`script_history`）。
+- 限额：脚本 ≤ 2MB、语句 ≤ 10000、整脚本超时缺省 600s（`script_timeout_ms`）。
+- 不支持：`GRANT`/`REVOKE`（DBA 域）、SQL*Plus 控制流指令（`EXIT`/`WHENEVER`/`@file`）、psql 元命令。
 
 ## 测试
 

@@ -6,6 +6,8 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { classifyWrite } = require('../engine/sql-validator');
+const { classifyStatement } = require('../engine/script-splitter');
+const { LEGACY_FULL, missingBits } = require('../engine/permissions');
 
 const WRITE_LOG = 'write-log.jsonl';
 
@@ -21,7 +23,7 @@ function readLogEntries(dataDir) {
   }
 }
 
-function createWriteState({ humanGate, execSql, dataDir, log }) {
+function createWriteState({ humanGate, execSql, dataDir, log, permissionsOf = async () => LEGACY_FULL }) {
   const writeLogPath = path.join(dataDir, WRITE_LOG);
   // Map<requestId, entry>：同 requestId 多行时后行覆盖前行（attempting → executed 顺序）
   const executed = new Map(readLogEntries(dataDir).map((e) => [e.requestId, e]));
@@ -43,6 +45,11 @@ function createWriteState({ humanGate, execSql, dataDir, log }) {
     }
     const { opClass, reason } = classifyWrite(sql);
     if (opClass === 'REJECT') throw new Error(`写请求被拒绝：${reason}`);
+    const perms = await permissionsOf(connection);
+    const missing = missingBits(perms, classifyStatement(sql).cls);
+    if (missing.length > 0) {
+      throw new Error(`连接 "${connection}" 未授权 ${missing.join('/')} 操作——请在插件面板「数据库」中调整该连接权限`);
+    }
     const id = await humanGate().create({
       sessionId: p.sessionId,
       taskId: typeof p.taskId === 'string' ? p.taskId : null,

@@ -34,10 +34,10 @@ describe('createTools', () => {
     return { tools, callService, toolCtx };
   }
 
-  it('11 个工具定义 + 短名合法（宿主 SHORT_NAME_RE）+ 宿主契约字段 inputSchema', () => {
+  it('14 个工具定义 + 短名合法（宿主 SHORT_NAME_RE）+ 宿主契约字段 inputSchema', () => {
     const { tools } = mk();
     const defs = tools.getDefs();
-    expect(defs).toHaveLength(11);
+    expect(defs).toHaveLength(14);
     for (const d of defs) {
       expect(d.name).toMatch(/^[a-z][a-z0-9_]*$/);
       // 宿主 LLMToolDef 契约：inputSchema（非 OpenAI 风格 parameters）——
@@ -46,7 +46,7 @@ describe('createTools', () => {
       expect(d.inputSchema.properties).toBeDefined();
       expect(d.inputSchema.required).toBeInstanceOf(Array);
     }
-    expect(defs.map((d) => d.name)).toEqual(expect.arrayContaining(['query', 'write', 'write_status']));
+    expect(defs.map((d) => d.name)).toEqual(expect.arrayContaining(['query', 'write', 'write_status', 'script_execute', 'script_status', 'script_history']));
   });
 
   it('query：callService 注入 sessionId/taskId（Review Focus #4）+ 表格渲染', async () => {
@@ -91,5 +91,63 @@ describe('write_status 文案语义', () => {
     const t = mkStatus({ status: 'executed', affectedRows: 0, opClass: 'DML' });
     const out = await t.execute('write_status', { requestId: 'r' }, { roomId: 'x', taskId: null });
     expect(out).toContain('无匹配行');
+  });
+});
+
+// 脚本三工具（spec 2026-11-19 §5.6）：透传映射 + 渲染文案。
+describe('script_* 工具', () => {
+  function fakeCtx() {
+    const calls = [];
+    return {
+      calls,
+      callService: async (method, params) => {
+        calls.push({ method, params });
+        if (method === 'scriptExecute') return { requestId: 'r1', status: 'pending', scriptNo: 'S1', summary: { statementCount: 2 } };
+        if (method === 'scriptStatus') return { status: 'executed', result: { ok: true, total: 2, executed: 2, durationMs: 3 } };
+        return { entries: [] };
+      },
+    };
+  }
+
+  it('script_execute 透传并注入 sessionId/taskId，渲染待批准文案', async () => {
+    const ctx = fakeCtx();
+    const tools = createTools(ctx);
+    const text = await tools.execute('script_execute', { connection: 'c', script: 'X', on_error: 'continue' }, { roomId: 'room1', taskId: 't1' });
+    expect(ctx.calls[0].method).toBe('scriptExecute');
+    expect(ctx.calls[0].params).toMatchObject({ connection: 'c', script: 'X', onError: 'continue', sessionId: 'room1', taskId: 't1' });
+    expect(text).toContain('等待用户批准');
+  });
+
+  it('script_status executed → 返回执行摘要', async () => {
+    const tools = createTools(fakeCtx());
+    const text = await tools.execute('script_status', { requestId: 'r1' }, { roomId: 'room1' });
+    expect(text).toContain('已执行');
+  });
+
+  it('category 前缀与 defaultOn 缺省', () => {
+    const catalog = createTools(fakeCtx()).getCatalog();
+    const item = catalog.find((c) => c.name === 'script_execute');
+    expect(item.category).toBe('插件 db-pro');
+    expect(item.defaultOn).toBe(false);
+  });
+});
+
+// 无缺省连接概念（2026-11-19 用户裁定）：所有库操作工具 connection 必填。
+describe('connection 必填契约', () => {
+  it('全部数据库操作工具 required 含 connection', () => {
+    const defs = createTools({ callService: async () => ({}) }).getDefs();
+    const need = ['query', 'list_schemas', 'list_tables', 'list_views', 'describe_table', 'list_columns', 'get_ddl', 'explain_query', 'write', 'script_execute'];
+    for (const name of need) {
+      const d = defs.find((x) => x.name === name);
+      expect(d.inputSchema.required).toContain('connection');
+      expect(d.inputSchema.properties.connection.description).not.toContain('缺省');
+    }
+  });
+  it('list_connections 渲染包含描述（用途说明）', async () => {
+    const tools = createTools({
+      callService: async () => ({ connections: [{ name: 'mysql_dev', dialect: 'mysql', description: '开发库 · 只读', ok: true }] }),
+    });
+    const text = await tools.execute('list_connections', {}, { roomId: 'r' });
+    expect(text).toContain('开发库 · 只读');
   });
 });
