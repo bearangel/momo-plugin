@@ -5,6 +5,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import m from '../../plugins/db-pro/service/script-state.js';
+import splitter from '../../plugins/db-pro/engine/script-splitter.js';
+const { splitStatements, summarize, extractScriptNo } = splitter;
 const { createScriptState } = m;
 
 function makeDeps(overrides = {}) {
@@ -138,5 +140,36 @@ describe('script-state · 作业异常路径（终审 Important）', () => {
     expect(last.result.total).toBe(0);
     expect(last.result.executed).toBe(0);
     expect(last.result.error.message).toContain('engine crashed');
+  });
+});
+
+// 审批前权限预检（spec 2026-11-19 §6.4）：缺位在建卡前拒，dryrun 同样受检。
+const realAnalyze = async (_connection, script) => {
+  const r = splitStatements(script, 'mysql');
+  return { statements: r.statements, warnings: r.warnings, summary: summarize(r.statements), scriptNo: extractScriptNo(script) };
+};
+
+describe('审批前权限预检', () => {
+  it('缺 script 位 → submit 直接拒（不建卡）', async () => {
+    const { state, gate } = makeDeps({ permissionsOf: async () => ['query'] });
+    await expect(state.submit({ connection: 'c', script: 'SELECT 1', sessionId: 's' }))
+      .rejects.toThrow(/script/);
+    expect(gate.created).toHaveLength(0);
+  });
+  it('逐条分类缺位 → 报语句序号与缺失位', async () => {
+    const { state } = makeDeps({ permissionsOf: async () => ['query', 'script'], analyze: realAnalyze });
+    await expect(state.submit({ connection: 'c', script: 'SELECT 1;\nDROP TABLE t;', sessionId: 's' }))
+      .rejects.toThrow(/第 2 条.*ddl_table/);
+  });
+  it('dryrun 同样受检', async () => {
+    const { state } = makeDeps({ permissionsOf: async () => ['query', 'script'], analyze: realAnalyze });
+    await expect(state.submit({ connection: 'c', script: 'DROP TABLE t;', sessionId: 's', dryrun: true }))
+      .rejects.toThrow(/ddl_table/);
+  });
+  it('权限齐 → 正常建卡', async () => {
+    const { state, gate } = makeDeps({ permissionsOf: async () => ['query', 'script', 'insert'] });
+    const r = await state.submit({ connection: 'c', script: 'SELECT 1', sessionId: 's' });
+    expect(r.status).toBe('pending');
+    expect(gate.created).toHaveLength(1);
   });
 });

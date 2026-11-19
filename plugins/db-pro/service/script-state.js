@@ -5,6 +5,7 @@
 // 执行中断（尝试中无结果）返回 exec_unknown，绝不重跑。
 const fs = require('node:fs');
 const path = require('node:path');
+const { LEGACY_FULL, hasBit, missingBits } = require('../engine/permissions');
 
 const HISTORY_FILE = 'script-history.jsonl';
 const MAX_SCRIPT_BYTES = 2 * 1024 * 1024;
@@ -21,7 +22,7 @@ function readEntries(file) {
   }
 }
 
-function createScriptState({ humanGate, analyze, run, dataDir, log }) {
+function createScriptState({ humanGate, analyze, run, dataDir, log, permissionsOf = async () => LEGACY_FULL }) {
   const file = path.join(dataDir, HISTORY_FILE);
   const records = new Map(readEntries(file).map((e) => [e.requestId, e]));
   const jobs = new Map();
@@ -55,6 +56,16 @@ function createScriptState({ humanGate, analyze, run, dataDir, log }) {
     const analysis = await analyze(connection, script);
     if ((analysis.statements?.length ?? 0) > MAX_STATEMENTS) {
       throw new Error(`脚本语句数超过 ${MAX_STATEMENTS} 条上限——请拆分后分批执行`);
+    }
+    const perms = await permissionsOf(connection);
+    if (!hasBit(perms, 'script')) {
+      throw new Error(`连接 "${connection}" 未授权 script（脚本执行）——请在插件面板「数据库」中开启该连接权限`);
+    }
+    for (const s of analysis.statements ?? []) {
+      const missing = s.cls === 'priv' ? ['GRANT/REVOKE 不支持'] : missingBits(perms, s.cls);
+      if (missing.length > 0) {
+        throw new Error(`脚本第 ${s.idx} 条（第 ${s.line} 行）需要 ${missing.join('/')} 权限——连接 "${connection}" 未授权`);
+      }
     }
     if (analysis.statements?.length === 0) {
       return { dryrun: p.dryrun === true, statements: [], warnings: analysis.warnings ?? [], summary: analysis.summary, scriptNo: analysis.scriptNo, note: '0 条语句（空脚本/纯注释/纯客户端指令）' };

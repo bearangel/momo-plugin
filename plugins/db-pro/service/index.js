@@ -62,6 +62,11 @@ function createService(ctx) {
     },
     dataDir: ctx.getDataDir(),
     log: (msg, meta) => ctx.logger.warn(msg, meta),
+    permissionsOf: async (name) => {
+      const rows = await store.listForEngine().catch(() => []);
+      const hit = rows.find((r) => r.name === name);
+      return hit ? hit.permissions : [];
+    },
   });
 
   const store = createConnectionsStore({
