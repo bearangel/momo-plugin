@@ -170,4 +170,15 @@ async function createPool(connUrl, opts = {}) {
   };
 }
 
-module.exports = { createPool, parseUrl, parseExplainPlan };
+/** 直连探测（不入池）：dmdb 池别名 = 连接串，同别名重复建池报 [20006] —— 测试连接走直连 */
+async function probeUrl(url) {
+  const conn = await dmdb.getConnection(url);
+  try {
+    await conn.execute('SELECT 1');
+  } finally {
+    await conn.close().catch(() => undefined);
+  }
+  return true;
+}
+
+module.exports = { createPool, parseUrl, parseExplainPlan, probeUrl };

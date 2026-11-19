@@ -276,13 +276,14 @@ function createService(ctx) {
       return { connections: store.listProjection() };
     }
     if (method === 'connectionsTest') {
-      let url = typeof params.url === 'string' && params.url.trim() !== '' ? params.url.trim() : '';
-      if (url === '') {
-        const rows = await store.listForEngine();
-        const hit = rows.find((r) => r.name === String(params.name));
-        if (!hit) throw new Error('连接不存在或缺少密钥');
-        url = hit.url;
+      const url = typeof params.url === 'string' ? params.url.trim() : '';
+      const name = typeof params.name === 'string' ? params.name.trim() : '';
+      if (url === '' && name !== '') {
+        if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
+        await ensureConfig();
+        return await rpc('connTest', { name }, 20_000);
       }
+      if (url === '') throw new Error('connectionsTest 须提供 name 或 url');
       const timeoutMs = sanitizeTimeoutMs(ctx.getConfig().query_timeout_ms);
       return await rpc('probe', { url, queryTimeoutMs: timeoutMs }, 20_000);
     }

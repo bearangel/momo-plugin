@@ -203,7 +203,12 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         const proto = new URL(params.url).protocol.replace(':', '');
         const loader = DIALECT_LOADERS[proto];
         if (!loader) throw new EngineError(CODES.CONN, `不支持的连接协议 "${proto}://"（支持 mysql/postgres/oracle/dm）`);
-        const tmp = await loadDriver(proto).createPool(params.url, { queryTimeoutMs: params.queryTimeoutMs ?? 30_000 });
+        const driver = loadDriver(proto);
+        if (typeof driver.probeUrl === 'function') {
+          await driver.probeUrl(params.url);
+          return { ok: true };
+        }
+        const tmp = await driver.createPool(params.url, { queryTimeoutMs: params.queryTimeoutMs ?? 30_000 });
         try { await tmp.ping(); } finally { await tmp.close().catch(() => undefined); }
         return { ok: true };
       }
