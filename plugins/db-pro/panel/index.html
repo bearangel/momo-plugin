@@ -61,7 +61,7 @@
   .star.on { color: var(--status-warning); }
   .side-ft { margin-top: auto; padding: 9px 12px; border-top: 1px solid var(--border-subtle); font-size: 10.5px; color: var(--text-tertiary); }
   .empty-side { padding: 26px 14px; text-align: center; color: var(--text-tertiary); font-size: 11.5px; display: flex; flex-direction: column; gap: 8px; align-items: center; }
-  .editor { padding: 16px 20px 12px; display: flex; flex-direction: column; gap: 13px; overflow: auto; min-height: 0; width: 100%; max-width: 860px; }
+  .editor { padding: 16px 20px 56px; display: flex; flex-direction: column; gap: 13px; overflow: auto; min-height: 0; width: 100%; max-width: 860px; }
   .ed-hd { display: flex; align-items: center; gap: 8px; }
   .ed-hd h3 { font-size: 13px; font-weight: 600; flex: 1; }
   .lbl { display: block; font-size: 11px; color: var(--text-secondary); margin-bottom: 4px; }
@@ -89,12 +89,13 @@
   .ok { color: var(--status-success); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
   .bad { color: var(--status-error); font-size: 11.5px; display: inline-flex; align-items: center; gap: 4px; }
   .ed-ft { display: flex; align-items: center; gap: 8px; margin-top: 6px; padding: 10px 0 8px; border-top: 1px solid var(--border-subtle); }
-  .danger { color: var(--status-error); }
+  .btn.danger { color: var(--status-error); border-color: transparent; background: transparent; }
+  .btn.danger:hover { background: var(--status-error-tint); }
   .spacer { flex: 1; }
   .empty-main { flex: 1; display: flex; flex-direction: column; gap: 6px; align-items: center; justify-content: center; color: var(--text-tertiary); font-size: 12px; }
   .empty-main .big { width: 26px; height: 26px; color: var(--text-disabled); }
   .banner { border-radius: 6px; padding: 6px 9px; font-size: 11.5px; background: var(--status-error-tint); color: var(--status-error); }
-  .confirm-bar { display: none; align-items: center; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--border-subtle); background: var(--surface-1); font-size: 11.5px; }
+  .confirm-bar { display: none; position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; align-items: center; gap: 8px; padding: 8px 20px; border-top: 1px solid var(--border-strong); background: var(--surface-1); font-size: 11.5px; box-shadow: 0 -4px 14px rgba(0,0,0,.08); }
   .confirm-bar .msg { flex: 1; color: var(--text-secondary); }
 </style>
 </head>
