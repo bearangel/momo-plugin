@@ -5,8 +5,9 @@
 //（Electron 内嵌 Node 无该开关——L1 实测 bad option）；分发兜底 L3 见 RESULT.md。
 const { spawn } = require('node:child_process');
 const path = require('node:path');
-const { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, validateWriteConnection } = require('./config-connections');
+const { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, sanitizeScriptTimeoutMs, validateWriteConnection } = require('./config-connections');
 const { createWriteState } = require('./write-state');
+const { createScriptState } = require('./script-state');
 const { isFatalSpawnError } = require('./spawn-diag');
 
 const ENGINE_BOOT_TIMEOUT_MS = 8_000;
@@ -35,6 +36,29 @@ function createService(ctx) {
       return ctx.humanGate;
     },
     execSql: (connection, sql) => rpc('exec', { connection, sql }),
+    dataDir: ctx.getDataDir(),
+    log: (msg, meta) => ctx.logger.warn(msg, meta),
+  });
+
+  const scriptState = createScriptState({
+    humanGate: () => {
+      if (!ctx.humanGate) throw new Error('宿主未注入 humanGate（需包含该扩展的 momo-studio 版本）');
+      return ctx.humanGate;
+    },
+    analyze: async (connection, script) => {
+      if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
+      return await rpc('scriptAnalyze', { script, dialect: dialectOfUrl(connection) }, 30_000);
+    },
+    run: async (payload) => {
+      if (!child) throw new Error('db-pro 引擎未就绪（脚本作业中止）');
+      const timeoutMs = sanitizeScriptTimeoutMs(ctx.getConfig().script_timeout_ms);
+      return await rpc('scriptRun', {
+        connection: payload.connection,
+        script: payload.script,
+        onError: payload.onError,
+        scriptTimeoutMs: timeoutMs,
+      }, timeoutMs + 5_000);
+    },
     dataDir: ctx.getDataDir(),
     log: (msg, meta) => ctx.logger.warn(msg, meta),
   });
@@ -176,6 +200,11 @@ function createService(ctx) {
     }
   }
 
+  function dialectOfUrl(name) {
+    const conn = lastConnections.find((c) => c.name === name);
+    return conn ? dialectOf(conn.url) : 'mysql';
+  }
+
   // 行数上限净化：负数 slice 会从尾部截（同类 -40 隐患）——非有限/<=0 归 200，封顶 10000
   function sanitizeMaxRows(raw) {
     const n = Number(raw);
@@ -191,6 +220,14 @@ function createService(ctx) {
       return writeState.request(params);
     }
     if (method === 'writeStatus') return writeState.status(params);
+    if (method === 'scriptExecute') {
+      if (child) await ensureConfig();
+      const withConn = params.connection ? params : { ...params, connection: defaultConnection() };
+      validateWriteConnection(lastConnections, withConn.connection);
+      return scriptState.submit(withConn);
+    }
+    if (method === 'scriptStatus') return scriptState.status(params);
+    if (method === 'scriptHistory') return scriptState.history(params);
     if (method === 'listConnections') {
       if (child) await ensureConfig();
       return {

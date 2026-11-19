@@ -22,7 +22,8 @@
       "conn6_name": { "type": "string", "title": "连接 6 · 名称（缺省 conn6）" },
       "default_connection": { "type": "string", "title": "缺省连接名（工具省略 connection 时使用）" },
       "readonly_max_rows": { "type": "number", "title": "只读查询返回行数上限（缺省 200）" },
-      "query_timeout_ms": { "type": "number", "title": "单查询超时毫秒（缺省 30000）" }
+      "query_timeout_ms": { "type": "number", "title": "单查询超时毫秒（缺省 30000）" },
+      "script_timeout_ms": { "type": "number", "title": "整脚本执行超时毫秒（缺省 600000；下限 10000，上限 3600000）" }
     }
   }
 }

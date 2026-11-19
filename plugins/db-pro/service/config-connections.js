@@ -28,6 +28,13 @@ function connectionsFromConfig(config) {
   return conns;
 }
 
+/** 整脚本超时净化：非有限/负数 → 缺省 600s；下限 10s；上限 3600s */
+function sanitizeScriptTimeoutMs(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 600_000;
+  return Math.min(Math.max(n, 10_000), 3_600_000);
+}
+
 /** 有变化返回 true（按名比对 url/timeout；数量不等即变） */
 function diffConnections(prev, next) {
   if (prev.length !== next.length) return true;
@@ -48,4 +55,4 @@ function validateWriteConnection(conns, name) {
   }
 }
 
-module.exports = { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, validateWriteConnection, SLOT_COUNT };
+module.exports = { connectionsFromConfig, diffConnections, sanitizeTimeoutMs, sanitizeScriptTimeoutMs, validateWriteConnection, SLOT_COUNT };
