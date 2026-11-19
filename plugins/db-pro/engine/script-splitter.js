@@ -37,6 +37,7 @@ function splitStatements(scriptRaw, dialectRaw) {
   let blockComment = false;
   let lineComment = false;
   let atLineStart = true;
+  let terminator = ';';
 
   function flush() {
     const text = buf.trim();
@@ -44,6 +45,15 @@ function splitStatements(scriptRaw, dialectRaw) {
     if (text !== '') {
       statements.push({ idx: statements.length + 1, line: stmtLine, text, keyword: firstKeyword(text) });
     }
+  }
+
+  // MySQL 客户端指令（spec §5.2）：独立成行且当前缓冲无实质内容才识别
+  function tryDelimiterDirective(at) {
+    if (dialect !== 'mysql' || !atLineStart || buf.trim() !== '') return -1;
+    const m = src.slice(at).match(/^delimiter[ \t]+(\S+)[ \t]*\r?\n?/i);
+    if (!m) return -1;
+    terminator = m[1];
+    return at + m[0].length - 1;
   }
 
   function markStartIfNeeded(c) {
@@ -60,6 +70,17 @@ function splitStatements(scriptRaw, dialectRaw) {
       atLineStart = true;
       lineComment = false;
       continue;
+    }
+
+    if (atLineStart && buf.trim() === '') {
+      const skipTo = tryDelimiterDirective(i);
+      if (skipTo >= 0) {
+        const consumed = src.slice(i, skipTo + 1);
+        line += (consumed.match(/\n/g) ?? []).length;
+        i = skipTo;
+        atLineStart = true;
+        continue;
+      }
     }
 
     if (quote === null && !blockComment && !lineComment) {
@@ -114,8 +135,9 @@ function splitStatements(scriptRaw, dialectRaw) {
       continue;
     }
 
-    if (c === ';') {
+    if (src.startsWith(terminator, i)) {
       flush();
+      i += terminator.length - 1;
       atLineStart = false;
       continue;
     }

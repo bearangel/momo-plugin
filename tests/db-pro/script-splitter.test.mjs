@@ -39,3 +39,31 @@ describe('splitStatements · 基础切分', () => {
     expect(() => splitStatements('SELECT 1', 'sqlite')).toThrow(/不支持的脚本方言/);
   });
 });
+
+describe('splitStatements · MySQL DELIMITER', () => {
+  it('过程体内的分号不切分，DELIMITER 切到 // 后再切回 ;', () => {
+    const script = [
+      "SET @__script_no = 'S00971511';",
+      'DELIMITER //',
+      'CREATE PROCEDURE p_demo()',
+      'BEGIN',
+      '  INSERT INTO t VALUES (1);',
+      '  INSERT INTO t VALUES (2);',
+      'END //',
+      'DELIMITER ;',
+      'CALL p_demo();',
+    ].join('\n');
+    const r = splitStatements(script, 'mysql');
+    expect(r.statements).toHaveLength(3);
+    expect(r.statements[0].keyword).toBe('set');
+    expect(r.statements[1].keyword).toBe('create');
+    expect(r.statements[1].text).toContain('INSERT INTO t VALUES (2);');
+    expect(r.statements[1].text.trim().endsWith('END')).toBe(true);
+    expect(r.statements[2].keyword).toBe('call');
+    expect(r.statements[1].line).toBe(3);
+  });
+  it('DELIMITER 行本身不产出语句', () => {
+    const r = splitStatements('DELIMITER //\nSELECT 1//\nDELIMITER ;\nSELECT 2;', 'mysql');
+    expect(r.statements.map((s) => s.text)).toEqual(['SELECT 1', 'SELECT 2']);
+  });
+});
