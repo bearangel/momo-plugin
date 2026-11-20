@@ -151,3 +151,68 @@ describe('connection 必填契约', () => {
     expect(text).toContain('开发库 · 只读');
   });
 });
+
+// C 期回执（spec 2026-11-20 §8.4）：语句/业务结果分离 + 逐条明细 + 核验 + 预检分级
+describe('tools · C 期回执与描述', () => {
+  function mkScriptTools(statusRes, execRes) {
+    const callService = vi.fn(async (method) => {
+      if (method === 'scriptStatus') return statusRes;
+      if (method === 'scriptExecute') return execRes;
+      return {};
+    });
+    const tools = createTools({ callService, logger: { info: () => {}, warn: () => {} } });
+    return { tools, callService };
+  }
+
+  it('script_status executed：摘要行区分语句/业务 + 逐条明细 + 核验', async () => {
+    const { tools } = mkScriptTools({ status: 'executed', result: {
+      ok: true, total: 8, executed: 8, durationMs: 1200,
+      businessStatus: 'failed', businessSource: 'layer1_marker',
+      businessError: '[FAIL] S00971511 -- [23000] Duplicate entry',
+      results: [{ idx: 3, line: 10, kind: 'call', status: 'ok', affectedRows: 0, durationMs: 500,
+        outputs: [{ columns: ['execution_status'], rows: [['[FAIL] S00971511 -- [23000] Duplicate entry']] }] }],
+      verification: [{ table: 'DAP_E_MCP_TOOL', before: 18, after: 23, delta: 5 }],
+    } });
+    const text = await tools.execute('script_status', { requestId: 'r1' }, { roomId: 'room1' });
+    expect(text).toContain('语句 8/8 成功');
+    expect(text).toContain('业务结果：失败');
+    expect(text).toContain('[23000]');
+    expect(text).toContain('#3');
+    expect(text).toContain('call');
+    expect(text).toContain('DAP_E_MCP_TOOL: +5 (18→23)');
+    expect(text).toContain('参考值');
+  });
+
+  it('script_status executed 业务成功（层2）', async () => {
+    const { tools } = mkScriptTools({ status: 'executed', result: {
+      ok: true, total: 8, executed: 8, durationMs: 100,
+      businessStatus: 'ok', businessSource: 'layer2_logtable', results: [], verification: [] } });
+    const text = await tools.execute('script_status', { requestId: 'r1' }, { roomId: 'room1' });
+    expect(text).toContain('业务结果：成功');
+    expect(text).toContain('日志表');
+  });
+
+  it('dryrun 回执呈现 precheck 分级项', async () => {
+    const { tools } = mkScriptTools(null, { dryrun: true, statements: [
+      { idx: 1, line: 1, cls: 'insert', keyword: 'insert', tables: ['t'] }],
+      summary: { statementCount: 1, counts: {}, tables: [] }, scriptNo: 'S1',
+      precheck: { ran: true, supported: true, items: [
+        { level: 'high', code: 'uk_conflict', message: 't 与已存在记录冲突' },
+        { level: 'warn', code: 'collation_mismatch', message: '表 t collation 不一致' },
+      ] } });
+    const text = await tools.execute('script_execute', { connection: 'c', script: 'X', dryrun: true }, { roomId: 'room1' });
+    expect(text).toContain('high');
+    expect(text).toContain('t 与已存在记录冲突');
+    expect(text).toContain('预检');
+  });
+
+  it('工具描述含业务判定与预检说明', async () => {
+    const { tools } = mkScriptTools(null, null);
+    const defs = tools.getDefs();
+    const se = defs.find((d) => d.name === 'script_execute');
+    expect(se.description).toContain('业务');
+    expect(se.description).toContain('预检');
+    const ss = defs.find((d) => d.name === 'script_status');
+    expect(ss.description).toContain('业务');
+  });
+});
