@@ -486,3 +486,32 @@ describe('scriptRun · 层2 scriptJudge 权威判定', () => {
     expect(r.businessSource).toBe('layer1_marker');
   });
 });
+
+// R7（spec 2026-11-20 §8.1）：连接报错附可用列表，误用旧名可自我纠错
+describe('connError · 报错附可用连接（R7）', () => {
+  it('query 误用连接名 → 报错含当前可用列表', async () => {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    await expect(d.dispatch('query', { connection: 'nope', sql: 'SELECT 1' }))
+      .rejects.toThrow(/未配置的连接 "nope"（当前可用：c1）/);
+  });
+  it('零连接 → 提示去面板添加', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => fakeDriver().pool }));
+    await expect(d.dispatch('query', { connection: 'x', sql: 'SELECT 1' }))
+      .rejects.toThrow(/当前无已配置连接——请到插件面板添加/);
+  });
+  it('scriptRun 同样受益（收敛重复手写报错）', async () => {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    await expect(d.dispatch('scriptRun', { connection: 'ghost', script: 'SELECT 1;' }))
+      .rejects.toThrow(/当前可用：c1/);
+  });
+  it('坏连接（unavailable）→ 保留失败原因', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => { throw new Error('ETIMEDOUT x'); } }));
+    await d.dispatch('configure', { connections: CFG() });
+    await expect(d.dispatch('query', { connection: 'c1', sql: 'SELECT 1' }))
+      .rejects.toThrow(/c1" 配置失败：ETIMEDOUT/);
+  });
+});

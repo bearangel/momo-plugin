@@ -79,12 +79,22 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
   // 坏连接名 → 失败原因（configure 逐连接隔离，终审 I2：单连接失败不拖垮整批）
   const unavailable = new Map();
 
+  // R7（spec 2026-11-20 §8.1）：报错附可用连接列表，误用旧名可自我纠错
+  function connError(name) {
+    const reason = unavailable.get(name);
+    const avail = [...pools.keys()];
+    const tail = avail.length === 0
+      ? '当前无已配置连接——请到插件面板添加'
+      : `当前可用：${avail.join('、')}`;
+    return new EngineError(CODES.CONN, reason
+      ? `连接 "${name}" 配置失败：${reason}——请修正连接串后重试`
+      : `未配置的连接 "${name}"（${tail}）`);
+  }
+
   function mustPool(name) {
     const h = pools.get(name);
     if (h) return h.pool;
-    const reason = unavailable.get(name);
-    if (reason) throw new EngineError(CODES.CONN, `连接 "${name}" 配置失败：${reason}——请修正连接串后重试`);
-    throw new EngineError(CODES.CONN, `未配置的连接 "${name}"——请在插件设置中配置后重试`);
+    throw connError(name);
   }
 
   async function applyConfigure(connections) {
@@ -194,12 +204,7 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
       // 脚本执行仅由 service 在人工批准后调用（与 exec 同侧边界）
       case 'scriptRun': {
         const handle = pools.get(params.connection);
-        if (!handle) {
-          const reason = unavailable.get(params.connection);
-          throw new EngineError(CODES.CONN, reason
-            ? `连接 "${params.connection}" 配置失败：${reason}`
-            : `未配置的连接 "${params.connection}"——请在插件设置中配置后重试`);
-        }
+        if (!handle) throw connError(params.connection);
         const dialect = dialectOfUrl(handle.url);
         const { statements } = splitStatements(params.script, dialect);
         if (statements.length === 0) return { ok: true, total: 0, executed: 0, results: [], durationMs: 0 };
