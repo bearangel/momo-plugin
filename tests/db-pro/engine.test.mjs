@@ -252,3 +252,87 @@ describe('权限 enforcement（配置态闸）', () => {
     await expect(d.dispatch('probe', { url: 'sqlite://x' })).rejects.toThrow(/不支持的连接协议/);
   });
 });
+
+// 业务成功判定层 1（spec 2026-11-20 §4.1/§4.3）：CALL 输出 [FAIL] 标记 → 语句全 ok 也判业务失败
+describe('scriptRun · 层1 业务判定与逐条明细（spec 2026-11-20）', () => {
+  function cannedDriver(perStatement) {
+    const execLog = [];
+    return {
+      execLog,
+      pool: {
+        async ping() {},
+        async close() {},
+        async openSession() {
+          let i = 0;
+          return {
+            async exec(sql) {
+              execLog.push(sql);
+              const r = perStatement[i++];
+              if (r === undefined) return { affectedRows: 0, outputs: null };
+              if (r instanceof Error) throw r;
+              return r;
+            },
+            async count() { return null; },
+            async finish(ok) { execLog.push(ok ? 'finish:ok' : 'finish:fail'); },
+            async close() { execLog.push('close'); },
+          };
+        },
+      },
+    };
+  }
+  async function setupCanned(perStatement) {
+    const fake = cannedDriver(perStatement);
+    const d = createDispatcher(() => ({ createPool: async () => fake.pool }));
+    await d.dispatch('configure', { connections: [{ name: 't', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000 }] });
+    return { d, fake };
+  }
+
+  const FAIL_OUT = [{ columns: ['execution_status'], rows: [['[FAIL] S00971511 -- [23000] Duplicate entry']] }];
+
+  it('语句全 ok + 层1 命中 → businessStatus failed、businessError 透传、逐条明细含 kind/outputs', async () => {
+    const { d } = await setupCanned([
+      { affectedRows: 0, outputs: null },
+      { affectedRows: 0, outputs: null },
+      { affectedRows: 0, outputs: FAIL_OUT },
+      { affectedRows: 0, outputs: null },
+    ]);
+    const r = await d.dispatch('scriptRun', { connection: 't',
+      script: 'SET @a = 1;\nDROP PROCEDURE IF EXISTS sp;\nCALL sp();\nDROP PROCEDURE IF EXISTS sp;' });
+    expect(r.ok).toBe(true);
+    expect(r.results.every((x) => x.status === 'ok')).toBe(true);
+    expect(r.businessStatus).toBe('failed');
+    expect(r.businessSource).toBe('layer1_marker');
+    expect(r.businessError).toContain('[23000]');
+    expect(r.results[2].kind).toBe('call');
+    expect(r.results[2].outputs[0].rows[0][0]).toContain('[FAIL]');
+    expect(typeof r.results[0].durationMs).toBe('number');
+  });
+
+  it('onError=continue 语句失败 + 层1 命中 → 语句失败优先（Review Focus 6）', async () => {
+    const { d } = await setupCanned([
+      { affectedRows: 0, outputs: null },
+      new Error('boom'),
+      { affectedRows: 0, outputs: FAIL_OUT },
+    ]);
+    const r = await d.dispatch('scriptRun', { connection: 't',
+      script: 'SET @a=1;\nINSERT INTO t VALUES (1);\nCALL sp();', onError: 'continue' });
+    expect(r.ok).toBe(false);
+    expect(r.businessStatus).toBe('failed');
+    expect(r.businessSource).toBe('statement');
+    expect(r.businessError).toContain('boom');
+  });
+
+  it('无命中 → businessStatus ok', async () => {
+    const { d } = await setupCanned([{ affectedRows: 2, outputs: null }]);
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'INSERT INTO t VALUES (1);' });
+    expect(r.businessStatus).toBe('ok');
+    expect(r.businessError).toBeUndefined();
+  });
+
+  it('scriptAnalyze 并入 handler_order 警告', async () => {
+    const d0 = createDispatcher(() => ({ createPool: async () => (await import('../../plugins/db-pro/engine/drivers/mysql.js')).createPool }));
+    const r = await d0.dispatch('scriptAnalyze', { dialect: 'mysql', script:
+      'DELIMITER //\nCREATE PROCEDURE sp_x()\nBEGIN\n DECLARE EXIT HANDLER FOR SQLEXCEPTION\n BEGIN\n  ROLLBACK;\n  GET DIAGNOSTICS CONDITION 1 @e = MESSAGE_TEXT;\n END;\nEND//\nDELIMITER ;' });
+    expect(r.warnings.some((w) => w.type === 'handler_order')).toBe(true);
+  });
+});

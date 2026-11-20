@@ -3,8 +3,23 @@
 // 协议：NDJSON JSON-RPC（protocol.js）；驱动懒加载（缺方言不拖垮其他连接）。
 const { runServer, EngineError, CODES } = require('./protocol');
 const { assertReadOnly } = require('./sql-validator');
-const { splitStatements, summarize, extractScriptNo, classifyStatement } = require('./script-splitter');
+const { splitStatements, summarize, extractScriptNo, classifyStatement, detectTemplateIssues } = require('./script-splitter');
 const { LEGACY_FULL, hasBit, missingBits, requiredBitsForClass } = require('./permissions');
+
+// 层 1 失败标记默认正则（spec 2026-11-20 §4.1）：DAP-E 模板约定 handler 失败分支
+// SELECT '[FAIL] …'——任一输出单元格命中即业务失败；连接级 scriptJudge.failPattern 可覆盖。
+const DEFAULT_FAIL_PATTERN = /^\[FAIL\]/;
+
+function scanFailureMarker(outputs, pattern = DEFAULT_FAIL_PATTERN) {
+  for (const out of outputs ?? []) {
+    for (const row of out.rows ?? []) {
+      for (const cellText of row) {
+        if (pattern.test(cellText)) return cellText;
+      }
+    }
+  }
+  return null;
+}
 
 const DIALECT_LOADERS = {
   mysql: () => require('./drivers/mysql'),
@@ -132,6 +147,8 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
       }
       case 'scriptAnalyze': {
         const r = splitStatements(params.script, params.dialect ?? 'mysql');
+        const issues = detectTemplateIssues(r.statements);
+        if (issues.length > 0) r.warnings.push(...issues);
         return { ...r, summary: summarize(r.statements), scriptNo: extractScriptNo(params.script) };
       }
       // 脚本执行仅由 service 在人工批准后调用（与 exec 同侧边界）
@@ -164,11 +181,14 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
               failure = { code: 'script_timeout', message: `整脚本超时（${Math.round(timeoutMs / 1000)}s）——已中止`, line: s.line };
               break;
             }
+            const t0 = Date.now();
             try {
               const r = await session.exec(s.text);
-              results.push({ idx: s.idx, line: s.line, status: 'ok', affectedRows: r.affectedRows ?? 0 });
+              results.push({ idx: s.idx, line: s.line, kind: s.keyword, status: 'ok',
+                affectedRows: r.affectedRows ?? 0, outputs: r.outputs ?? null, durationMs: Date.now() - t0 });
             } catch (err) {
-              results.push({ idx: s.idx, line: s.line, status: 'failed', error: err instanceof Error ? err.message : String(err) });
+              results.push({ idx: s.idx, line: s.line, kind: s.keyword, status: 'failed',
+                error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - t0 });
               if (failedAtIndex === null) {
                 failedAtIndex = s.idx;
                 failure = { code: err?.code ?? 'driver_error', message: err instanceof Error ? err.message : String(err), line: s.line };
@@ -177,18 +197,37 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
             }
           }
           await session.finish(failure === null);
+          // 业务判定链（spec §4.3）：语句失败 > 层 2（scriptJudge，接线见 §4.2 任务）> 层 1 > ok
+          let businessStatus = 'ok';
+          let businessError = null;
+          let businessSource = null;
+          if (failure !== null) {
+            businessStatus = 'failed';
+            businessError = failure.message;
+            businessSource = 'statement';
+          } else {
+            const marker = scanFailureMarker(results.flatMap((x) => x.outputs ?? []));
+            if (marker) {
+              businessStatus = 'failed';
+              businessError = marker;
+              businessSource = 'layer1_marker';
+            }
+          }
+          return {
+            ok: failure === null,
+            total: statements.length,
+            executed: results.length,
+            results,
+            businessStatus,
+            ...(businessError !== null ? { businessError } : {}),
+            ...(businessSource !== null ? { businessSource } : {}),
+            ...(failedAtIndex !== null ? { failedAtIndex } : {}),
+            ...(failure !== null ? { error: failure } : {}),
+            durationMs: Date.now() - started,
+          };
         } finally {
           await session.close();
         }
-        return {
-          ok: failure === null,
-          total: statements.length,
-          executed: results.length,
-          results,
-          ...(failedAtIndex !== null ? { failedAtIndex } : {}),
-          ...(failure !== null ? { error: failure } : {}),
-          durationMs: Date.now() - started,
-        };
       }
       // exec 仅由 service 在人工批准后调用（spec §6.2：引擎协议不暴露给 agent）
       case 'exec': {
