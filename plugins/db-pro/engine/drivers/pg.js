@@ -124,6 +124,15 @@ async function createPool(connUrl, opts = {}) {
           const res = await client.query({ text: sql, values: [] });
           return { affectedRows: res.rowCount ?? 0 };
         },
+        async count(table) {
+          const sql = countSql(table);
+          if (!sql) return null;
+          try {
+            const res = await client.query({ text: sql, values: [] });
+            const v = res.rows?.[0]?.c;
+            return typeof v === 'number' ? v : null;
+          } catch { return null; } // 表不存在/权限 → null，核验降级不炸
+        },
         async finish() {},
         async close() { client.release(); },
       };
@@ -134,4 +143,9 @@ async function createPool(connUrl, opts = {}) {
   };
 }
 
-module.exports = { createPool, parseUrl };
+function countSql(table) {
+  if (!/^[A-Za-z_][A-Za-z0-9_$]*$/.test(String(table))) return null; // 非法标识符 → 核验降级 null
+  return `SELECT COUNT(*)::int AS c FROM ${qi(table)}`;
+}
+
+module.exports = { createPool, parseUrl, countSql };

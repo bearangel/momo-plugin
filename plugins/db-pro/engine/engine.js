@@ -172,6 +172,10 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         const timeoutMs = Number.isFinite(params.scriptTimeoutMs) ? params.scriptTimeoutMs : 600_000;
         const started = Date.now();
         const session = await handle.pool.openSession();
+        // R6 核验快照（spec §7.2）：推断表去重取前 20，语句循环前后各 COUNT 一次
+        const verifyTables = [...new Set(statements.flatMap((s) => s.tables ?? []))].slice(0, 20);
+        const beforeCounts = new Map();
+        for (const t of verifyTables) beforeCounts.set(t, await session.count(t));
         const results = [];
         let failedAtIndex = null;
         let failure = null;
@@ -213,6 +217,12 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
               businessSource = 'layer1_marker';
             }
           }
+          const verification = [];
+          for (const t of verifyTables) {
+            const b = beforeCounts.get(t) ?? null;
+            const a = await session.count(t);
+            verification.push({ table: t, before: b, after: a, delta: b !== null && a !== null ? a - b : null });
+          }
           return {
             ok: failure === null,
             total: statements.length,
@@ -221,6 +231,7 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
             businessStatus,
             ...(businessError !== null ? { businessError } : {}),
             ...(businessSource !== null ? { businessSource } : {}),
+            ...(verifyTables.length > 0 ? { verification } : {}),
             ...(failedAtIndex !== null ? { failedAtIndex } : {}),
             ...(failure !== null ? { error: failure } : {}),
             durationMs: Date.now() - started,

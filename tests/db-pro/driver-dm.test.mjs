@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import m from '../../plugins/db-pro/engine/drivers/dm.js';
-const { parseUrl, parseExplainPlan } = m;
+const { parseUrl, parseExplainPlan, countSql } = m;
 
 describe('dm parseUrl', () => {
   it('常规形态 + 默认 schema = 用户名大写', () => {
@@ -39,5 +39,14 @@ describe('parseExplainPlan（lastExecInfo.explain 文本）', () => {
   });
   it('空文本容忍', () => {
     expect(parseExplainPlan('')).toEqual({ text: '', operators: [], summary: '' });
+  });
+});
+
+describe('dm countSql（spec 2026-11-20 §7.2 核验快照）', () => {
+  it('合法表名 → 双引号包裹 COUNT', () => {
+    expect(countSql('DBPRO_T')).toBe('SELECT COUNT(*) AS C FROM "DBPRO_T"');
+  });
+  it('非法标识符 → null', () => {
+    expect(countSql('a b')).toBeNull();
   });
 });

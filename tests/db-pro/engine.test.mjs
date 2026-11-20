@@ -336,3 +336,61 @@ describe('scriptRun · 层1 业务判定与逐条明细（spec 2026-11-20）', (
     expect(r.warnings.some((w) => w.type === 'handler_order')).toBe(true);
   });
 });
+
+// R6 核验快照（spec 2026-11-20 §7.2）：语句循环前后同会话 COUNT，delta=净增删
+describe('scriptRun · verification 核验快照', () => {
+  async function setupCounting(perTableCounts) {
+    const callCount = new Map();
+    const execLog = [];
+    const pool = {
+      async ping() {}, async close() {},
+      async openSession() {
+        return {
+          async exec(sql) { execLog.push(sql); return { affectedRows: 0, outputs: null }; },
+          async count(t) {
+            const n = callCount.get(t) ?? 0;
+            callCount.set(t, n + 1);
+            return perTableCounts[t]?.[n] ?? null; // 第 1 次调用=before、第 2 次=after
+          },
+          async finish() {}, async close() {},
+        };
+      },
+    };
+    const d = createDispatcher(() => ({ createPool: async () => pool }));
+    await d.dispatch('configure', { connections: [{ name: 't', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000 }] });
+    return { d, execLog };
+  }
+
+  it('before/after 两次 count + delta（含建表前 null / 删表后 null）', async () => {
+    const { d } = await setupCounting({ t1: [5, 8], t2: [null, 3], t3: [2, null] });
+    const r = await d.dispatch('scriptRun', { connection: 't',
+      script: 'INSERT INTO t1 VALUES (1);\nINSERT INTO t2 VALUES (1);\nDROP TABLE t3;' });
+    expect(r.verification).toEqual([
+      { table: 't1', before: 5, after: 8, delta: 3 },
+      { table: 't2', before: null, after: 3, delta: null },
+      { table: 't3', before: 2, after: null, delta: null },
+    ]);
+  });
+
+  it('表数超 20 只取前 20（去重后）', async () => {
+    const counts = {};
+    for (let i = 1; i <= 25; i += 1) counts[`t${i}`] = [1, 1];
+    const { d } = await setupCounting(counts);
+    const script = Array.from({ length: 25 }, (_, i) => `INSERT INTO t${i + 1} VALUES (1);`).join('\n');
+    const r = await d.dispatch('scriptRun', { connection: 't', script });
+    expect(r.verification.length).toBe(20);
+    expect(r.verification[0].table).toBe('t1');
+  });
+
+  it('无目标表 → 不带 verification 字段', async () => {
+    const { d } = await setupCounting({});
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT 1;' });
+    expect(r.verification).toBeUndefined();
+  });
+
+  it('同表多语句只计数一次表项（去重）', async () => {
+    const { d } = await setupCounting({ t1: [1, 3] });
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'INSERT INTO t1 VALUES (1);\nUPDATE t1 SET a = 1;' });
+    expect(r.verification).toEqual([{ table: 't1', before: 1, after: 3, delta: 2 }]);
+  });
+});
