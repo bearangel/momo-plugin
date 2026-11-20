@@ -215,3 +215,31 @@ describe('tools · C 期回执与描述', () => {
     expect(ss.description).toContain('业务');
   });
 });
+
+// 批准后续跑链文案（宿主 2026-11-20 兜底唤醒落地）：工具返回教 agent 安心收尾等待，批准后自动唤醒
+describe('tools · 两段式批准自动续跑文案', () => {
+  function mkFor(method, res) {
+    const callService = vi.fn(async (m) => (m === method ? res : {}));
+    const tools = createTools({ callService, logger: { info: () => {}, warn: () => {} } });
+    return tools;
+  }
+  it('write 返回：等待批准可收尾、批准后自动继续', async () => {
+    const tools = mkFor('write', { requestId: 'rq-1', status: 'pending' });
+    const text = await tools.execute('write', { connection: 'c', sql: 'UPDATE t SET a=1' }, { roomId: 'r1' });
+    expect(text).toContain('批准');
+    expect(text).toContain('自动唤醒继续');
+    expect(text).not.toContain('提醒用户');
+  });
+  it('script_execute 返回：同语义', async () => {
+    const tools = mkFor('scriptExecute', { requestId: 'rq-2', status: 'pending', summary: { statementCount: 3 }, scriptNo: 'S1' });
+    const text = await tools.execute('script_execute', { connection: 'c', script: 'SELECT 1;' }, { roomId: 'r1' });
+    expect(text).toContain('自动唤醒继续');
+    expect(text).not.toContain('提醒用户');
+  });
+  it('write_status / script_status pending 文案不再催提醒', async () => {
+    const t1 = await mkFor('writeStatus', { status: 'pending' }).execute('write_status', { requestId: 'r' }, { roomId: 'r1' });
+    expect(t1).not.toContain('提醒');
+    const t2 = await mkFor('scriptStatus', { status: 'pending' }).execute('script_status', { requestId: 'r' }, { roomId: 'r1' });
+    expect(t2).not.toContain('提醒');
+  });
+});

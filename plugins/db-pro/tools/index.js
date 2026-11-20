@@ -111,7 +111,7 @@ const DEFS = [
   },
   {
     name: 'write',
-    description: '发起写操作（INSERT/UPDATE/DELETE/MERGE=DML；CREATE/DROP/ALTER/TRUNCATE=DDL）。不直接执行——创建人工批准请求，须提醒用户在「人工请求」面板批准/拒绝，随后用 write_status 查询结果。批准前不得声称已执行。',
+    description: '发起写操作（INSERT/UPDATE/DELETE/MERGE=DML；CREATE/DROP/ALTER/TRUNCATE=DDL）。不直接执行——创建人工批准请求，用户在「人工请求」面板批准/拒绝后系统会自动唤醒本会话，届时调 write_status 查询结果继续工作。批准前不得声称已执行。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -195,7 +195,7 @@ function render(name, res) {
     return `${res.text}${res.summary ? `\n摘要: ${res.summary}` : ''}`;
   }
   if (name === 'write') {
-    return `写请求已创建（requestId: ${res.requestId}），等待用户在「人工请求」面板批准。请提醒用户处理，随后调用 write_status 查询结果——批准前不会执行任何写操作。`;
+    return `写请求已创建（requestId: ${res.requestId}），等待用户在「人工请求」面板批准。批准/拒绝后我会被自动唤醒继续——届时调用 write_status 查询结果。批准前不会执行任何写操作。`;
   }
   if (name === 'write_status') {
     if (res.status === 'executed') {
@@ -224,7 +224,7 @@ function render(name, res) {
       return `${head}\n预检（连库，分级告警不阻断）${pcLines.length === 0 ? '：无异常项' : `：\n${pcLines.join('\n')}`}`;
     }
     if (res.note) return `脚本${res.note}——未执行。`;
-    return `脚本执行请求已创建（requestId: ${res.requestId}，${res.summary?.statementCount ?? '?'} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}），等待用户批准。请提醒用户后调用 script_status 轮询——批准前不会执行任何语句。`;
+    return `脚本执行请求已创建（requestId: ${res.requestId}，${res.summary?.statementCount ?? '?'} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}），等待用户批准。批准/拒绝后我会被自动唤醒继续——届时调用 script_status 查询结果。批准前不会执行任何语句。`;
   }
   if (name === 'script_status') {
     if (res.status === 'pending') return '仍在等待用户批准脚本执行。';
