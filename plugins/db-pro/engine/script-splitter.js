@@ -26,21 +26,23 @@ function firstKeyword(text) {
 }
 
 const TABLE_PATTERNS = [
-  /\b(?:insert\s+into|replace\s+into|merge\s+into)\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\bupdate\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\bdelete\s+from\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\btruncate\s+table\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\b(?:create|drop|alter)\s+table\s+(?:if\s+(?:not\s+)?exists\s+)?([A-Za-z0-9_$."`[\]]+)/i,
-  /\bcreate\s+(?:unique\s+)?index\s+\S+\s+on\s+([A-Za-z0-9_$."`[\]]+)/i,
+  /\b(?:insert\s+into|replace\s+into|merge\s+into)\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\bupdate\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\bdelete\s+from\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\btruncate\s+table\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\b(?:create|drop|alter)\s+table\s+(?:if\s+(?:not\s+)?exists\s+)?([A-Za-z0-9_$."`[\]]+)/gi,
+  /\bcreate\s+(?:unique\s+)?index\s+\S+\s+on\s+([A-Za-z0-9_$."`[\]]+)/gi,
 ];
 
+// 逐模式全量收集（matchAll）：存储过程体内多个 INSERT 目标都要进 tables——
+// R6 核验快照与 R4 预检依赖完整表清单，首匹配会漏表（2026-11-20 集成实证）
 function inferTables(text) {
   const out = [];
   for (const re of TABLE_PATTERNS) {
-    const m = text.match(re);
-    if (!m) continue;
-    const name = m[1].replace(/["`[\]]/g, '').split('.').pop();
-    if (name && !out.includes(name)) out.push(name);
+    for (const m of String(text).matchAll(re)) {
+      const name = m[1].replace(/["`[\]]/g, '').split('.').pop();
+      if (name && !out.includes(name)) out.push(name);
+    }
   }
   return out;
 }
@@ -327,4 +329,28 @@ function extractScriptNo(scriptRaw) {
   return m ? m[1] : null;
 }
 
-module.exports = { splitStatements, summarize, extractScriptNo, firstKeyword, classifyStatement, inferTables, SplitterError };
+// 模板缺陷检测（spec 2026-11-20 §6 附带）：EXIT HANDLER 内 ROLLBACK 先于
+// GET DIAGNOSTICS——MySQL 的 ROLLBACK 会清空诊断区，真实错误被吞成
+// [?] Unknown error（DAP-E 模板实证）。MySQL 语法启发式：仅扫 procedure
+// 语句文本，命中即告警（非阻断，dryrun 呈现）。
+function detectTemplateIssues(statements) {
+  const issues = [];
+  for (const s of statements ?? []) {
+    if (s.cls !== 'procedure' || !/CREATE\s+PROCEDURE/i.test(s.text)) continue;
+    const m = s.text.match(/EXIT\s+HANDLER[^;]*\sBEGIN([\s\S]*?)\bEND/si);
+    if (!m) continue;
+    const body = m[1];
+    const rb = body.search(/\bROLLBACK\b/i);
+    const gd = body.search(/\bGET\s+DIAGNOSTICS\b/i);
+    if (rb >= 0 && gd >= 0 && rb < gd) {
+      issues.push({
+        line: s.line,
+        type: 'handler_order',
+        message: `第 ${s.line} 行存储过程 EXIT HANDLER 内 ROLLBACK 先于 GET DIAGNOSTICS——回滚会清空诊断区吞错（真实错误变 [?] Unknown error）。建议模板改为先取诊断再回滚。`,
+      });
+    }
+  }
+  return issues;
+}
+
+module.exports = { splitStatements, summarize, extractScriptNo, firstKeyword, classifyStatement, inferTables, SplitterError, detectTemplateIssues };

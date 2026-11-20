@@ -252,3 +252,204 @@ describe('权限 enforcement（配置态闸）', () => {
     await expect(d.dispatch('probe', { url: 'sqlite://x' })).rejects.toThrow(/不支持的连接协议/);
   });
 });
+
+// 业务成功判定层 1（spec 2026-11-20 §4.1/§4.3）：CALL 输出 [FAIL] 标记 → 语句全 ok 也判业务失败
+describe('scriptRun · 层1 业务判定与逐条明细（spec 2026-11-20）', () => {
+  function cannedDriver(perStatement) {
+    const execLog = [];
+    return {
+      execLog,
+      pool: {
+        async ping() {},
+        async close() {},
+        async openSession() {
+          let i = 0;
+          return {
+            async exec(sql) {
+              execLog.push(sql);
+              const r = perStatement[i++];
+              if (r === undefined) return { affectedRows: 0, outputs: null };
+              if (r instanceof Error) throw r;
+              return r;
+            },
+            async count() { return null; },
+            async finish(ok) { execLog.push(ok ? 'finish:ok' : 'finish:fail'); },
+            async close() { execLog.push('close'); },
+          };
+        },
+      },
+    };
+  }
+  async function setupCanned(perStatement) {
+    const fake = cannedDriver(perStatement);
+    const d = createDispatcher(() => ({ createPool: async () => fake.pool }));
+    await d.dispatch('configure', { connections: [{ name: 't', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000 }] });
+    return { d, fake };
+  }
+
+  const FAIL_OUT = [{ columns: ['execution_status'], rows: [['[FAIL] S00971511 -- [23000] Duplicate entry']] }];
+
+  it('语句全 ok + 层1 命中 → businessStatus failed、businessError 透传、逐条明细含 kind/outputs', async () => {
+    const { d } = await setupCanned([
+      { affectedRows: 0, outputs: null },
+      { affectedRows: 0, outputs: null },
+      { affectedRows: 0, outputs: FAIL_OUT },
+      { affectedRows: 0, outputs: null },
+    ]);
+    const r = await d.dispatch('scriptRun', { connection: 't',
+      script: 'SET @a = 1;\nDROP PROCEDURE IF EXISTS sp;\nCALL sp();\nDROP PROCEDURE IF EXISTS sp;' });
+    expect(r.ok).toBe(true);
+    expect(r.results.every((x) => x.status === 'ok')).toBe(true);
+    expect(r.businessStatus).toBe('failed');
+    expect(r.businessSource).toBe('layer1_marker');
+    expect(r.businessError).toContain('[23000]');
+    expect(r.results[2].kind).toBe('call');
+    expect(r.results[2].outputs[0].rows[0][0]).toContain('[FAIL]');
+    expect(typeof r.results[0].durationMs).toBe('number');
+  });
+
+  it('onError=continue 语句失败 + 层1 命中 → 语句失败优先（Review Focus 6）', async () => {
+    const { d } = await setupCanned([
+      { affectedRows: 0, outputs: null },
+      new Error('boom'),
+      { affectedRows: 0, outputs: FAIL_OUT },
+    ]);
+    const r = await d.dispatch('scriptRun', { connection: 't',
+      script: 'SET @a=1;\nINSERT INTO t VALUES (1);\nCALL sp();', onError: 'continue' });
+    expect(r.ok).toBe(false);
+    expect(r.businessStatus).toBe('failed');
+    expect(r.businessSource).toBe('statement');
+    expect(r.businessError).toContain('boom');
+  });
+
+  it('无命中 → businessStatus ok', async () => {
+    const { d } = await setupCanned([{ affectedRows: 2, outputs: null }]);
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'INSERT INTO t VALUES (1);' });
+    expect(r.businessStatus).toBe('ok');
+    expect(r.businessError).toBeUndefined();
+  });
+
+  it('scriptAnalyze 并入 handler_order 警告', async () => {
+    const d0 = createDispatcher(() => ({ createPool: async () => (await import('../../plugins/db-pro/engine/drivers/mysql.js')).createPool }));
+    const r = await d0.dispatch('scriptAnalyze', { dialect: 'mysql', script:
+      'DELIMITER //\nCREATE PROCEDURE sp_x()\nBEGIN\n DECLARE EXIT HANDLER FOR SQLEXCEPTION\n BEGIN\n  ROLLBACK;\n  GET DIAGNOSTICS CONDITION 1 @e = MESSAGE_TEXT;\n END;\nEND//\nDELIMITER ;' });
+    expect(r.warnings.some((w) => w.type === 'handler_order')).toBe(true);
+  });
+});
+
+// R6 核验快照（spec 2026-11-20 §7.2）：语句循环前后同会话 COUNT，delta=净增删
+describe('scriptRun · verification 核验快照', () => {
+  async function setupCounting(perTableCounts) {
+    const callCount = new Map();
+    const execLog = [];
+    const pool = {
+      async ping() {}, async close() {},
+      async openSession() {
+        return {
+          async exec(sql) { execLog.push(sql); return { affectedRows: 0, outputs: null }; },
+          async count(t) {
+            const n = callCount.get(t) ?? 0;
+            callCount.set(t, n + 1);
+            return perTableCounts[t]?.[n] ?? null; // 第 1 次调用=before、第 2 次=after
+          },
+          async finish() {}, async close() {},
+        };
+      },
+    };
+    const d = createDispatcher(() => ({ createPool: async () => pool }));
+    await d.dispatch('configure', { connections: [{ name: 't', url: 'mysql://u:p@h/d', queryTimeoutMs: 1000 }] });
+    return { d, execLog };
+  }
+
+  it('before/after 两次 count + delta（含建表前 null / 删表后 null）', async () => {
+    const { d } = await setupCounting({ t1: [5, 8], t2: [null, 3], t3: [2, null] });
+    const r = await d.dispatch('scriptRun', { connection: 't',
+      script: 'INSERT INTO t1 VALUES (1);\nINSERT INTO t2 VALUES (1);\nDROP TABLE t3;' });
+    expect(r.verification).toEqual([
+      { table: 't1', before: 5, after: 8, delta: 3 },
+      { table: 't2', before: null, after: 3, delta: null },
+      { table: 't3', before: 2, after: null, delta: null },
+    ]);
+  });
+
+  it('表数超 20 只取前 20（去重后）', async () => {
+    const counts = {};
+    for (let i = 1; i <= 25; i += 1) counts[`t${i}`] = [1, 1];
+    const { d } = await setupCounting(counts);
+    const script = Array.from({ length: 25 }, (_, i) => `INSERT INTO t${i + 1} VALUES (1);`).join('\n');
+    const r = await d.dispatch('scriptRun', { connection: 't', script });
+    expect(r.verification.length).toBe(20);
+    expect(r.verification[0].table).toBe('t1');
+  });
+
+  it('无目标表 → 不带 verification 字段', async () => {
+    const { d } = await setupCounting({});
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'SELECT 1;' });
+    expect(r.verification).toBeUndefined();
+  });
+
+  it('同表多语句只计数一次表项（去重）', async () => {
+    const { d } = await setupCounting({ t1: [1, 3] });
+    const r = await d.dispatch('scriptRun', { connection: 't', script: 'INSERT INTO t1 VALUES (1);\nUPDATE t1 SET a = 1;' });
+    expect(r.verification).toEqual([{ table: 't1', before: 1, after: 3, delta: 2 }]);
+  });
+});
+
+
+// R7（spec 2026-11-20 §8.1）：连接报错附可用列表，误用旧名可自我纠错
+describe('connError · 报错附可用连接（R7）', () => {
+  it('query 误用连接名 → 报错含当前可用列表', async () => {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    await expect(d.dispatch('query', { connection: 'nope', sql: 'SELECT 1' }))
+      .rejects.toThrow(/未配置的连接 "nope"（当前可用：c1）/);
+  });
+  it('零连接 → 提示去面板添加', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => fakeDriver().pool }));
+    await expect(d.dispatch('query', { connection: 'x', sql: 'SELECT 1' }))
+      .rejects.toThrow(/当前无已配置连接——请到插件面板添加/);
+  });
+  it('scriptRun 同样受益（收敛重复手写报错）', async () => {
+    const f = fakeDriver();
+    const d = createDispatcher(() => ({ createPool: async () => f.pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    await expect(d.dispatch('scriptRun', { connection: 'ghost', script: 'SELECT 1;' }))
+      .rejects.toThrow(/当前可用：c1/);
+  });
+  it('坏连接（unavailable）→ 保留失败原因', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => { throw new Error('ETIMEDOUT x'); } }));
+    await d.dispatch('configure', { connections: CFG() });
+    await expect(d.dispatch('query', { connection: 'c1', sql: 'SELECT 1' }))
+      .rejects.toThrow(/c1" 配置失败：ETIMEDOUT/);
+  });
+});
+
+// scriptPrecheck 引擎方法（spec 2026-11-20 §6）：service dryrun 经 rpc 调用
+describe('dispatch · scriptPrecheck', () => {
+  it('切分脚本后调 runPrecheck，透传 items', async () => {
+    const pool = {
+      async ping() {}, async close() {},
+      query: async (sql) => {
+        if (/information_schema\.TABLES/i.test(sql)) return { columns: [], rows: [['t', 'utf8mb4_0900_ai_ci']] };
+        if (/@@collation_database/i.test(sql)) return { columns: [], rows: [['utf8mb4_0900_ai_ci']] };
+        if (/information_schema\.COLUMNS/i.test(sql)) return { columns: [], rows: [['t', 'a']] };
+        if (/information_schema\.STATISTICS/i.test(sql)) return { columns: [], rows: [] };
+        if (/COUNT/i.test(sql)) return { columns: [], rows: [[0]] };
+        throw new Error('unexpected: ' + sql);
+      },
+    };
+    const d = createDispatcher(() => ({ createPool: async () => pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    const r = await d.dispatch('scriptPrecheck', { connection: 'c1', script: 'INSERT INTO t (a) VALUES (1);' });
+    expect(r.supported).toBe(true);
+    expect(Array.isArray(r.items)).toBe(true);
+  });
+  it('未配置连接 → connError；非 mysql → supported false', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => fakeDriver().pool }));
+    await expect(d.dispatch('scriptPrecheck', { connection: 'x', script: 'SELECT 1;' })).rejects.toThrow(/当前可用|当前无已配置/);
+    await d.dispatch('configure', { connections: [{ name: 'p', url: 'postgres://u:p@h/d', queryTimeoutMs: 1000 }] });
+    const r = await d.dispatch('scriptPrecheck', { connection: 'p', script: 'SELECT 1;' });
+    expect(r.supported).toBe(false);
+  });
+});

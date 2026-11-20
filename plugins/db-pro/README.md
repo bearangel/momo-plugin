@@ -49,10 +49,40 @@ agent 工具 plugin:db-pro/*（薄壳）
 
 - 支持一次提交多语句脚本（MySQL `DELIMITER`、PG 美元引用、Oracle/DM PL/SQL 块与 `/`）。
 - 流程：`script_execute` → 用户在「人工请求」面板批准 → 后台执行 → `script_status` 轮询。
-- `dryrun: true` 只做静态分析（语句清单/目标表/分类计数），不连库不审批。
+- `dryrun: true` 静态分析（语句清单/目标表/分类计数）+ 连库预检（见下节），不审批。
 - 幂等/留痕由脚本自身实现；工具只记录通用执行历史（`script_history`）。
 - 限额：脚本 ≤ 2MB、语句 ≤ 10000、整脚本超时缺省 600s（`script_timeout_ms`）。
 - 不支持：`GRANT`/`REVOKE`（DBA 域）、SQL*Plus 控制流指令（`EXIT`/`WHENEVER`/`@file`）、psql 元命令。
+
+## 业务成功判定（语句成功 ≠ 业务成功）
+
+存储过程常以 `EXIT HANDLER` 吞掉内部异常后正常返回——`CALL` 语句层「成功」但业务实际已回滚。
+工具对两者分别判定（判定链：语句失败 > 输出失败标记 > 成功）：
+
+- **语句结果**：逐条 `ok/failed`（含类别、影响行数、耗时、失败定位「第 N 条/第 L 行」）。
+- **业务结果**：捕获每条语句（含 `CALL`）的输出结果集（每语句前 50 行、单元格 200 字），任一单元格
+  匹配失败标记（默认正则 `^\[FAIL\]`，DAP-E 种子模板约定）即判 `businessStatus: failed`，
+  命中行全文透传回执（如 `[FAIL] S00971511 -- [23000] Duplicate entry ...`）——排障无需人工查执行日志表。
+- **核验快照**：语句执行前后对推断目标表（≤20 张）各 `COUNT(*)` 一次，回执附
+  `表: ±delta (before→after)`，标注「参考值（并发写存在误差）」；建表前/删表后以 null 呈现。
+- `script_status` 回执首行形态：`脚本已执行：语句 8/8 成功 · 业务结果：失败 —— [FAIL] ...`。
+
+## 执行预检（dryrun 连库检查，MySQL）
+
+`dryrun: true` 在静态分析之外默认连库做只读预检（连接不可达自动降级为纯静态并提示），产出分级告警
+（info/warn/high）不阻断，人工审批仍是硬门：
+
+| 检查 | 内容 | 级别 |
+|---|---|---|
+| 表存在性 | 目标表查 information_schema；脚本内先前 CREATE 的表不算缺 | warn |
+| INSERT 列匹配 | 列清单中的未知列（表中不存在/拼写错）逐条列出；表列缺省属默认值语义不告警 | warn |
+| UK/PK 冲突预演 | 多行 VALUES 逐元组提取字面量，对唯一键组等值 COUNT 探测既有冲突（提取不出静默跳过不误报） | high |
+| collation 一致性 | 目标表 collation vs 库默认，不一致建议脚本显式 `SET NAMES` | warn |
+
+另：MySQL 会话建立时自动对齐目标库 collation（`@@collation_database`）——驱动默认
+`utf8mb4_unicode_ci` 与 8.0 库表 `utf8mb4_0900_ai_ci` 混用导致的 `Illegal mix of collations`
+不再发生（脚本自带 `SET NAMES` 时自然覆盖）。dryrun 还会静态检测存储过程 handler 内
+`ROLLBACK` 先于 `GET DIAGNOSTICS` 的吞错模板并告警。
 
 ## 测试
 

@@ -2,9 +2,25 @@
 // db-pro 引擎子进程主体（spec §4.4）：连接池 Map + 方法调度 + 只读校验接线。
 // 协议：NDJSON JSON-RPC（protocol.js）；驱动懒加载（缺方言不拖垮其他连接）。
 const { runServer, EngineError, CODES } = require('./protocol');
+const { runPrecheck } = require('./precheck');
 const { assertReadOnly } = require('./sql-validator');
-const { splitStatements, summarize, extractScriptNo, classifyStatement } = require('./script-splitter');
+const { splitStatements, summarize, extractScriptNo, classifyStatement, detectTemplateIssues } = require('./script-splitter');
 const { LEGACY_FULL, hasBit, missingBits, requiredBitsForClass } = require('./permissions');
+
+// 层 1 失败标记默认正则（spec 2026-11-20 §4.1）：DAP-E 模板约定 handler 失败分支
+// SELECT '[FAIL] …'——任一输出单元格命中即业务失败（C10 裁定：仅此一层判定）。
+const DEFAULT_FAIL_PATTERN = /^\[FAIL\]/;
+
+function scanFailureMarker(outputs, pattern = DEFAULT_FAIL_PATTERN) {
+  for (const out of outputs ?? []) {
+    for (const row of out.rows ?? []) {
+      for (const cellText of row) {
+        if (pattern.test(cellText)) return cellText;
+      }
+    }
+  }
+  return null;
+}
 
 const DIALECT_LOADERS = {
   mysql: () => require('./drivers/mysql'),
@@ -27,12 +43,22 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
   // 坏连接名 → 失败原因（configure 逐连接隔离，终审 I2：单连接失败不拖垮整批）
   const unavailable = new Map();
 
+  // R7（spec 2026-11-20 §8.1）：报错附可用连接列表，误用旧名可自我纠错
+  function connError(name) {
+    const reason = unavailable.get(name);
+    const avail = [...pools.keys()];
+    const tail = avail.length === 0
+      ? '当前无已配置连接——请到插件面板添加'
+      : `当前可用：${avail.join('、')}`;
+    return new EngineError(CODES.CONN, reason
+      ? `连接 "${name}" 配置失败：${reason}——请修正连接串后重试`
+      : `未配置的连接 "${name}"（${tail}）`);
+  }
+
   function mustPool(name) {
     const h = pools.get(name);
     if (h) return h.pool;
-    const reason = unavailable.get(name);
-    if (reason) throw new EngineError(CODES.CONN, `连接 "${name}" 配置失败：${reason}——请修正连接串后重试`);
-    throw new EngineError(CODES.CONN, `未配置的连接 "${name}"——请在插件设置中配置后重试`);
+    throw connError(name);
   }
 
   async function applyConfigure(connections) {
@@ -132,17 +158,23 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
       }
       case 'scriptAnalyze': {
         const r = splitStatements(params.script, params.dialect ?? 'mysql');
+        const issues = detectTemplateIssues(r.statements);
+        if (issues.length > 0) r.warnings.push(...issues);
         return { ...r, summary: summarize(r.statements), scriptNo: extractScriptNo(params.script) };
+      }
+      // 连库预检（spec 2026-11-20 §6）：只读 information_schema + COUNT，dryrun 咨询性质
+      case 'scriptPrecheck': {
+        const handle = pools.get(params.connection);
+        if (!handle) throw connError(params.connection);
+        assertPerm(params.connection, 'read');
+        const dialect = dialectOfUrl(handle.url);
+        const { statements } = splitStatements(params.script, dialect);
+        return await runPrecheck(handle.pool, statements, dialect);
       }
       // 脚本执行仅由 service 在人工批准后调用（与 exec 同侧边界）
       case 'scriptRun': {
         const handle = pools.get(params.connection);
-        if (!handle) {
-          const reason = unavailable.get(params.connection);
-          throw new EngineError(CODES.CONN, reason
-            ? `连接 "${params.connection}" 配置失败：${reason}`
-            : `未配置的连接 "${params.connection}"——请在插件设置中配置后重试`);
-        }
+        if (!handle) throw connError(params.connection);
         const dialect = dialectOfUrl(handle.url);
         const { statements } = splitStatements(params.script, dialect);
         if (statements.length === 0) return { ok: true, total: 0, executed: 0, results: [], durationMs: 0 };
@@ -155,6 +187,10 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         const timeoutMs = Number.isFinite(params.scriptTimeoutMs) ? params.scriptTimeoutMs : 600_000;
         const started = Date.now();
         const session = await handle.pool.openSession();
+        // R6 核验快照（spec §7.2）：推断表去重取前 20，语句循环前后各 COUNT 一次
+        const verifyTables = [...new Set(statements.flatMap((s) => s.tables ?? []))].slice(0, 20);
+        const beforeCounts = new Map();
+        for (const t of verifyTables) beforeCounts.set(t, await session.count(t));
         const results = [];
         let failedAtIndex = null;
         let failure = null;
@@ -164,11 +200,14 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
               failure = { code: 'script_timeout', message: `整脚本超时（${Math.round(timeoutMs / 1000)}s）——已中止`, line: s.line };
               break;
             }
+            const t0 = Date.now();
             try {
               const r = await session.exec(s.text);
-              results.push({ idx: s.idx, line: s.line, status: 'ok', affectedRows: r.affectedRows ?? 0 });
+              results.push({ idx: s.idx, line: s.line, kind: s.keyword, status: 'ok',
+                affectedRows: r.affectedRows ?? 0, outputs: r.outputs ?? null, durationMs: Date.now() - t0 });
             } catch (err) {
-              results.push({ idx: s.idx, line: s.line, status: 'failed', error: err instanceof Error ? err.message : String(err) });
+              results.push({ idx: s.idx, line: s.line, kind: s.keyword, status: 'failed',
+                error: err instanceof Error ? err.message : String(err), durationMs: Date.now() - t0 });
               if (failedAtIndex === null) {
                 failedAtIndex = s.idx;
                 failure = { code: err?.code ?? 'driver_error', message: err instanceof Error ? err.message : String(err), line: s.line };
@@ -177,18 +216,44 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
             }
           }
           await session.finish(failure === null);
+          // 业务判定链（spec §4.3）：语句失败 > 层 1 标记 > ok（C10 裁定：层 2 权威判定不做）
+          let businessStatus = 'ok';
+          let businessError = null;
+          let businessSource = null;
+          if (failure !== null) {
+            businessStatus = 'failed';
+            businessError = failure.message;
+            businessSource = 'statement';
+          } else {
+            const marker = scanFailureMarker(results.flatMap((x) => x.outputs ?? []));
+            if (marker) {
+              businessStatus = 'failed';
+              businessError = marker;
+              businessSource = 'layer1_marker';
+            }
+          }
+          const verification = [];
+          for (const t of verifyTables) {
+            const b = beforeCounts.get(t) ?? null;
+            const a = await session.count(t);
+            verification.push({ table: t, before: b, after: a, delta: b !== null && a !== null ? a - b : null });
+          }
+          return {
+            ok: failure === null,
+            total: statements.length,
+            executed: results.length,
+            results,
+            businessStatus,
+            ...(businessError !== null ? { businessError } : {}),
+            ...(businessSource !== null ? { businessSource } : {}),
+            ...(verifyTables.length > 0 ? { verification } : {}),
+            ...(failedAtIndex !== null ? { failedAtIndex } : {}),
+            ...(failure !== null ? { error: failure } : {}),
+            durationMs: Date.now() - started,
+          };
         } finally {
           await session.close();
         }
-        return {
-          ok: failure === null,
-          total: statements.length,
-          executed: results.length,
-          results,
-          ...(failedAtIndex !== null ? { failedAtIndex } : {}),
-          ...(failure !== null ? { error: failure } : {}),
-          durationMs: Date.now() - started,
-        };
       }
       // exec 仅由 service 在人工批准后调用（spec §6.2：引擎协议不暴露给 agent）
       case 'exec': {

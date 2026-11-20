@@ -1,0 +1,106 @@
+-- ============================================================
+-- 样本测试包 01: 涉及数据表 DDL（源自 dape_dev_84 真实表结构）
+-- 注意：全部表为 utf8mb4_0900_ai_ci（MySQL 8.0 默认）——
+--       这是复现「Illegal mix of collations」冲突的关键环境特征
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS `dap_e_mcp_endpoint` (
+  `ENDPOINT_ID` bigint(20) unsigned NOT NULL COMMENT '主键（雪花算法生成）',
+  `SERVICE_ID` bigint(20) unsigned NOT NULL COMMENT '所属服务ID',
+  `HTTP_METHOD` varchar(10) NOT NULL COMMENT 'HTTP方法：GET/POST',
+  `PATH_PATTERN` varchar(255) NOT NULL COMMENT '服务内路径（不含网关前缀）',
+  `GATEWAY_PATH` varchar(255) NOT NULL COMMENT '网关对外完整路径',
+  `OPERATION_ID` varchar(255) DEFAULT NULL COMMENT 'springdoc operationId',
+  `SUMMARY` varchar(255) DEFAULT NULL COMMENT '接口摘要',
+  `DESCRIPTION` text COMMENT '接口详细描述',
+  `TAG_NAME` varchar(64) DEFAULT NULL COMMENT 'Controller分组名',
+  `INPUT_SCHEMA` json DEFAULT NULL COMMENT '接口入参JSON Schema',
+  `OUTPUT_SCHEMA` json DEFAULT NULL COMMENT '接口出参JSON Schema',
+  `SCHEMA_FINGERPRINT` varchar(64) DEFAULT NULL COMMENT '契约指纹（SHA-256）',
+  `SCHEMA_CHANGED_TIME` datetime DEFAULT NULL COMMENT '契约最后实质性变更时间',
+  `ENDPOINT_STATUS` tinyint(4) NOT NULL DEFAULT '1' COMMENT '状态：0-离线，1-在线',
+  `DEPRECATED` tinyint(4) NOT NULL DEFAULT '0' COMMENT '是否废弃：0-否，1-是',
+  `LAST_SYNC_TIME` datetime DEFAULT NULL COMMENT '最后同步时间',
+  `TENANT_ID` varchar(32) NOT NULL COMMENT '租户ID（平台级固定0）',
+  `ORG_ID` bigint(20) unsigned NOT NULL COMMENT '组织ID（平台级固定0）',
+  `CREATED_BY` varchar(64) NOT NULL COMMENT '创建人',
+  `CREATED_TIME` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `UPDATED_BY` varchar(64) DEFAULT NULL COMMENT '更新人',
+  `UPDATED_TIME` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `DELETED` tinyint(4) NOT NULL DEFAULT '0' COMMENT '逻辑删除标识（0-未删除，1-已删除）',
+  PRIMARY KEY (`ENDPOINT_ID`),
+  UNIQUE KEY `UK_DAP_E_MCP_ENDPOINT_METHOD_PATH` (`SERVICE_ID`,`HTTP_METHOD`,`PATH_PATTERN`),
+  KEY `IDX_DAP_E_MCP_ENDPOINT_GATEWAY_PATH` (`GATEWAY_PATH`),
+  KEY `IDX_DAP_E_MCP_ENDPOINT_SERVICE_STATUS` (`SERVICE_ID`,`ENDPOINT_STATUS`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='MCP接口元数据表';
+
+CREATE TABLE IF NOT EXISTS `dap_e_mcp_tool` (
+  `TOOL_ID` bigint(20) unsigned NOT NULL COMMENT '主键（雪花算法生成）',
+  `SERVICE_ID` bigint(20) unsigned NOT NULL COMMENT '归属服务ID',
+  `TOOL_NAME` varchar(128) NOT NULL COMMENT 'MCP工具名（全局唯一）',
+  `TOOL_TITLE` varchar(255) NOT NULL COMMENT '工具中文显示名',
+  `TOOL_DESCRIPTION` text NOT NULL COMMENT '给模型看的工具描述',
+  `CATEGORY_CODE` varchar(64) DEFAULT NULL COMMENT '业务分类编码',
+  `CATEGORY_NAME` varchar(128) DEFAULT NULL COMMENT '业务域名称',
+  `PERMISSION` varchar(16) NOT NULL DEFAULT 'readonly' COMMENT '权限三态：readonly/writable/executable',
+  `RISK_LEVEL` tinyint(4) NOT NULL DEFAULT '1' COMMENT '风险等级：1-低，2-中，3-高，4-极高',
+  `READ_ONLY` tinyint(4) NOT NULL DEFAULT '0' COMMENT '是否只读',
+  `IDEMPOTENT` tinyint(4) NOT NULL DEFAULT '0' COMMENT '是否幂等',
+  `DESTRUCTIVE` tinyint(4) NOT NULL DEFAULT '0' COMMENT '是否破坏性',
+  `INPUT_SCHEMA` json DEFAULT NULL COMMENT '工具入参JSON Schema',
+  `OUTPUT_SCHEMA` json DEFAULT NULL COMMENT '工具出参JSON Schema',
+  `PUBLISH_STATUS` tinyint(4) NOT NULL DEFAULT '0' COMMENT '发布状态：0-草稿，1-待审核，2-已发布，3-已下线',
+  `TOOL_VERSION` int(11) NOT NULL DEFAULT '0' COMMENT '工具版本号',
+  `PERMISSION_CODE` varchar(128) DEFAULT NULL COMMENT '执行所需功能权限点',
+  `VISIBLE_SCOPE` tinyint(4) NOT NULL DEFAULT '1' COMMENT '可见范围：1-全部租户，2-指定租户',
+  `TENANT_WHITELIST` json DEFAULT NULL COMMENT '指定租户ID数组',
+  `REVIEW_REQUIRED` tinyint(4) NOT NULL DEFAULT '0' COMMENT '契约变更后是否待复核',
+  `TENANT_ID` varchar(32) NOT NULL COMMENT '租户ID（平台级固定0）',
+  `ORG_ID` bigint(20) unsigned NOT NULL COMMENT '组织ID（平台级固定0）',
+  `CREATED_BY` varchar(64) NOT NULL COMMENT '创建人',
+  `CREATED_TIME` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `UPDATED_BY` varchar(64) DEFAULT NULL COMMENT '更新人',
+  `UPDATED_TIME` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `DELETED` tinyint(4) NOT NULL DEFAULT '0' COMMENT '逻辑删除标识（0-未删除，1-已删除）',
+  PRIMARY KEY (`TOOL_ID`),
+  UNIQUE KEY `UK_DAP_E_MCP_TOOL_TOOL_NAME` (`TOOL_NAME`),
+  KEY `IDX_DAP_E_MCP_TOOL_SERVICE_STATUS` (`SERVICE_ID`,`PUBLISH_STATUS`),
+  KEY `IDX_DAP_E_MCP_TOOL_STATUS_CATEGORY` (`PUBLISH_STATUS`,`CATEGORY_CODE`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='MCP工具元数据表';
+
+CREATE TABLE IF NOT EXISTS `dap_e_mcp_tool_binding` (
+  `BINDING_ID` bigint(20) unsigned NOT NULL COMMENT '主键（雪花算法生成）',
+  `TOOL_ID` bigint(20) unsigned NOT NULL COMMENT '工具ID',
+  `ENDPOINT_ID` bigint(20) unsigned NOT NULL COMMENT '接口ID',
+  `STEP_NO` int(11) NOT NULL DEFAULT '1' COMMENT '执行顺序（单接口固定1）',
+  `STEP_ROLE` tinyint(4) NOT NULL DEFAULT '1' COMMENT '步骤角色：1-主执行，2-前置校验，3-后置处理',
+  `REQUEST_MAPPING` json DEFAULT NULL COMMENT '工具入参到接口入参的映射',
+  `RESPONSE_MAPPING` json DEFAULT NULL COMMENT '接口响应到工具返回的抽取映射',
+  `CONDITION_EXPR` varchar(500) DEFAULT NULL COMMENT '步骤执行条件',
+  `TENANT_ID` varchar(32) NOT NULL COMMENT '租户ID（平台级固定0）',
+  `ORG_ID` bigint(20) unsigned NOT NULL COMMENT '组织ID（平台级固定0）',
+  `CREATED_BY` varchar(64) NOT NULL COMMENT '创建人',
+  `CREATED_TIME` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `UPDATED_BY` varchar(64) DEFAULT NULL COMMENT '更新人',
+  `UPDATED_TIME` datetime DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  `DELETED` tinyint(4) NOT NULL DEFAULT '0' COMMENT '逻辑删除标识（0-未删除，1-已删除）',
+  PRIMARY KEY (`BINDING_ID`),
+  UNIQUE KEY `UK_DAP_E_MCP_BINDING_TOOL_ENDPOINT_STEP` (`TOOL_ID`,`ENDPOINT_ID`,`STEP_NO`),
+  KEY `IDX_DAP_E_MCP_BINDING_ENDPOINT` (`ENDPOINT_ID`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='MCP工具与接口绑定关系表';
+
+CREATE TABLE IF NOT EXISTS `dap_e_script_execution_log` (
+  `LOG_ID` bigint(20) unsigned NOT NULL AUTO_INCREMENT COMMENT '日志ID（自增主键）',
+  `SCRIPT_NO` varchar(128) NOT NULL COMMENT '脚本单号（文件名去除 .sql 扩展名）',
+  `EXECUTION_STATUS` tinyint(4) NOT NULL COMMENT '执行状态：0=失败 1=成功',
+  `EXECUTION_TIME` datetime NOT NULL COMMENT '执行时间',
+  `EXECUTOR` varchar(64) NOT NULL COMMENT '执行人',
+  `EXECUTION_REASON` varchar(255) DEFAULT '' COMMENT '执行原因',
+  `ERROR_MESSAGE` text COMMENT '错误信息（失败时记录）',
+  `TENANT_ID` varchar(32) NOT NULL DEFAULT '0' COMMENT '租户ID',
+  `CREATED_TIME` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  PRIMARY KEY (`LOG_ID`),
+  KEY `IDX_DAP_E_SCRIPT_LOG_NO` (`SCRIPT_NO`),
+  KEY `IDX_DAP_E_SCRIPT_LOG_STATUS` (`EXECUTION_STATUS`),
+  KEY `IDX_DAP_E_SCRIPT_LOG_TIME` (`EXECUTION_TIME`)
+) ENGINE=InnoDB AUTO_INCREMENT=95 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='脚本执行记录表';

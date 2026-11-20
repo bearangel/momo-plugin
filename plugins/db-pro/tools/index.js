@@ -111,7 +111,7 @@ const DEFS = [
   },
   {
     name: 'write',
-    description: '发起写操作（INSERT/UPDATE/DELETE/MERGE=DML；CREATE/DROP/ALTER/TRUNCATE=DDL）。不直接执行——创建人工批准请求，须提醒用户在「人工请求」面板批准/拒绝，随后用 write_status 查询结果。批准前不得声称已执行。',
+    description: '发起写操作（INSERT/UPDATE/DELETE/MERGE=DML；CREATE/DROP/ALTER/TRUNCATE=DDL）。不直接执行——创建人工批准请求，用户在「人工请求」面板批准/拒绝后系统会自动唤醒本会话，届时调 write_status 查询结果继续工作。批准前不得声称已执行。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -132,7 +132,7 @@ const DEFS = [
   },
   {
     name: 'script_execute',
-    description: '执行 SQL 脚本（多语句，支持 DELIMITER/存储过程/会话变量/事务）。不直接执行——创建脚本级人工批准请求；批准后脚本在后台运行。先调 script_status 轮询结果。可用 dryrun:true 只做静态分析（不连库不审批）。幂等由脚本自身保证，工具不重复判断。',
+    description: '执行 SQL 脚本（多语句，支持 DELIMITER/存储过程/会话变量/事务）。不直接执行——创建脚本级人工批准请求；批准后脚本在后台运行。先调 script_status 轮询结果。回执区分「语句成功」与「业务成功」（业务失败 = 语句全过但脚本内回滚，失败标记输出直接透传）。dryrun:true 做静态分析 + 连库预检（表存在性/列匹配/唯一键冲突预演/collation，分级告警不阻断）。幂等由脚本自身保证，工具不重复判断。',
     inputSchema: {
       type: 'object',
       properties: {
@@ -146,7 +146,7 @@ const DEFS = [
   },
   {
     name: 'script_status',
-    description: '查询脚本执行状态：pending（待批准）/ denied / running（后台执行中）/ executed（含逐条摘要）/ exec_unknown（执行中断，勿重跑，先人工核查）/ not_found。',
+    description: '查询脚本执行状态：pending（待批准）/ denied / running（后台执行中）/ executed（含逐条明细、业务结果与核验摘要）/ exec_unknown（执行中断，勿重跑，先人工核查）/ not_found。业务结果以脚本输出失败标记（如 [FAIL]）为准，语句全成功不代表业务成功。',
     inputSchema: {
       type: 'object',
       properties: { requestId: { type: 'string', description: 'script_execute 返回的请求 ID' } },
@@ -195,7 +195,7 @@ function render(name, res) {
     return `${res.text}${res.summary ? `\n摘要: ${res.summary}` : ''}`;
   }
   if (name === 'write') {
-    return `写请求已创建（requestId: ${res.requestId}），等待用户在「人工请求」面板批准。请提醒用户处理，随后调用 write_status 查询结果——批准前不会执行任何写操作。`;
+    return `写请求已创建（requestId: ${res.requestId}），等待用户在「人工请求」面板批准。批准/拒绝后我会被自动唤醒继续——届时调用 write_status 查询结果。批准前不会执行任何写操作。`;
   }
   if (name === 'write_status') {
     if (res.status === 'executed') {
@@ -215,10 +215,16 @@ function render(name, res) {
   if (name === 'script_execute') {
     if (res.dryrun) {
       const lines = (res.statements ?? []).map((s) => `${s.idx}. [${s.cls}] L${s.line} ${s.keyword}${s.tables?.length ? ` → ${s.tables.join(',')}` : ''}`);
-      return `静态分析（未执行）：${res.statements?.length ?? 0} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}\n${lines.join('\n')}`;
+      const head = `静态分析（未执行）：${res.statements?.length ?? 0} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}\n${lines.join('\n')}`;
+      const pc = res.precheck;
+      if (!pc) return head;
+      if (pc.ran === false) return `${head}\n预检跳过：${pc.note ?? '（未知原因）'}——仅静态分析`;
+      if (pc.supported === false) return `${head}\n预检：${pc.note ?? '该方言暂不支持预检'}`;
+      const pcLines = (pc.items ?? []).map((x) => `[${x.level}] ${x.message}`);
+      return `${head}\n预检（连库，分级告警不阻断）${pcLines.length === 0 ? '：无异常项' : `：\n${pcLines.join('\n')}`}`;
     }
     if (res.note) return `脚本${res.note}——未执行。`;
-    return `脚本执行请求已创建（requestId: ${res.requestId}，${res.summary?.statementCount ?? '?'} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}），等待用户批准。请提醒用户后调用 script_status 轮询——批准前不会执行任何语句。`;
+    return `脚本执行请求已创建（requestId: ${res.requestId}，${res.summary?.statementCount ?? '?'} 条语句${res.scriptNo ? ` · 脚本号 ${res.scriptNo}` : ''}），等待用户批准。批准/拒绝后我会被自动唤醒继续——届时调用 script_status 查询结果。批准前不会执行任何语句。`;
   }
   if (name === 'script_status') {
     if (res.status === 'pending') return '仍在等待用户批准脚本执行。';
@@ -228,10 +234,27 @@ function render(name, res) {
     if (res.status === 'executed') {
       const r = res.result ?? {};
       const once = res.replayed ? '（本次返回缓存结果）' : '';
+      // C 期（spec §4.3）：语句层与业务层分离呈现；业务失败时错误全文透传
+      const biz = r.businessStatus === 'failed'
+        ? `业务结果：失败 —— ${r.businessError ?? '（无错误详情）'}`
+        : r.businessStatus === 'ok'
+          ? '业务结果：成功'
+          : '';
+      const detail = (r.results ?? []).slice(0, 30).map((x) => {
+        const out = x.outputs?.[0]?.rows?.[0]?.[0];
+        return `#${x.idx} ${x.kind ?? ''} L${x.line} ${x.status}${x.affectedRows ? ` ${x.affectedRows}行` : ''}${x.durationMs !== undefined ? ` ${x.durationMs}ms` : ''}${out ? ` | ${out.slice(0, 120)}` : ''}${x.error ? ` | 错误: ${x.error}` : ''}`;
+      });
+      const verify = (r.verification ?? []).map((v) =>
+        `${v.table}: ${v.delta === null || v.delta === undefined ? '—' : (v.delta >= 0 ? `+${v.delta}` : String(v.delta))} (${v.before ?? '?'}→${v.after ?? '?'})`);
+      const parts = [];
       if (r.ok === false) {
-        return `脚本执行失败${once}：已执行 ${r.executed}/${r.total} 条；失败在第 ${r.failedAtIndex} 条（第 ${r.error?.line} 行）——${r.error?.message ?? ''}`;
+        parts.push(`脚本执行失败${once}：已执行 ${r.executed}/${r.total} 条；失败在第 ${r.failedAtIndex} 条（第 ${r.error?.line} 行）——${r.error?.message ?? ''}`);
+      } else {
+        parts.push(`脚本已执行${once}：语句 ${r.executed}/${r.total} 成功${biz ? ` · ${biz}` : ''}，耗时 ${r.durationMs}ms`);
       }
-      return `脚本已执行${once}：${r.executed}/${r.total} 条语句成功，耗时 ${r.durationMs}ms。`;
+      if (detail.length > 0) parts.push(`逐条明细：\n${detail.join('\n')}${(r.results ?? []).length > 30 ? `\n…共 ${r.results.length} 条` : ''}`);
+      if (verify.length > 0) parts.push(`核验（参考值，并发写存在误差）：\n${verify.join('\n')}`);
+      return parts.join('\n');
     }
     return `状态: ${res.status}${res.note ? `（${res.note}）` : ''}`;
   }

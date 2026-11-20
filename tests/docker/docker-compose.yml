@@ -3,6 +3,9 @@ services:
   mysql:
     image: mysql:8.0
     container_name: dbpro-mysql
+    # 大小写不敏感（对齐 DAP-E dev 库语义）：样本脚本用大写表名引用、DDL 建表为小写，
+    # lcfn 须在建库初始化时指定（8.0 禁止事后改）——重建容器生效
+    command: --lower-case-table-names=1
     environment:
       MYSQL_ROOT_PASSWORD: dbpro123
       MYSQL_DATABASE: dbpro

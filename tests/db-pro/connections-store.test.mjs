@@ -103,3 +103,4 @@ describe('migrateLegacy（保等效）', () => {
     expect(store.listProjection()).toHaveLength(0);
   });
 });
+

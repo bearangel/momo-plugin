@@ -29,6 +29,80 @@ function cell(c) {
   return Buffer.isBuffer(c) ? c.toString('hex') : c;
 }
 
+// ── 脚本通道结果归一（spec 2026-11-20 §4.1/§7.1）──────────────────
+// mysql2 对 CALL 返回 [结果集数组, fields]；结果集元素可能是行数组（有
+// 输出）或 OkPacket（DML 尾包）。旧实现把结果集个数当影响行数——废除：
+// 输出捕获进 outputs（每集前 50 行、单元格 200 字），影响行数取最后一个 OkPacket。
+const OUTPUT_MAX_ROWS = 50;
+const OUTPUT_CELL_MAX = 200;
+
+function isOkPacket(x) {
+  return x !== null && typeof x === 'object' && !Array.isArray(x)
+    && ('affectedRows' in x || 'insertId' in x || 'serverStatus' in x);
+}
+
+function toOutput(set) {
+  if (!Array.isArray(set) || set.length === 0) return null;
+  const columns = Object.keys(set[0] ?? {});
+  if (columns.length === 0) return null;
+  const rows = set.slice(0, OUTPUT_MAX_ROWS)
+    .map((r) => columns.map((c) => String(cell(r[c]) ?? '').slice(0, OUTPUT_CELL_MAX)));
+  return { columns, rows };
+}
+
+function normalizeMysqlResults(res) {
+  if (isOkPacket(res)) return { affectedRows: res.affectedRows ?? 0, outputs: null };
+  if (Array.isArray(res) && res.length > 0 && !isOkPacket(res[0]) && !Array.isArray(res[0])) {
+    const out = toOutput(res);
+    return { affectedRows: out ? out.rows.length : 0, outputs: out ? [out] : null };
+  }
+  if (Array.isArray(res)) {
+    const outputs = res.map(toOutput).filter(Boolean);
+    const lastOk = [...res].reverse().find(isOkPacket);
+    return { affectedRows: lastOk?.affectedRows ?? 0, outputs: outputs.length > 0 ? outputs : null };
+  }
+  return { affectedRows: 0, outputs: null };
+}
+
+/** 会话工厂（导出以便单测注入假 conn）：exec 带结果集捕获；count 供核验快照 */
+function createMysqlSession(conn, timeoutMs) {
+  let aligned = false;
+  // R3（spec §5）：驱动默认会话 collation（utf8mb4_unicode_ci）≠ 目标库默认
+  // （如 utf8mb4_0900_ai_ci）时，过程/用户变量与表列比较会炸 Illegal mix
+  // of collations——首次 exec 前对齐到 @@collation_database；脚本自带
+  // SET NAMES 时后执行自然覆盖。charset 名来自服务器变量，白名单防注入。
+  async function alignCollationOnce() {
+    if (aligned) return;
+    aligned = true;
+    try {
+      const [res] = await conn.query({
+        sql: 'SELECT @@character_set_database AS cs, @@collation_database AS dbColl, @@collation_connection AS connColl',
+        timeout: timeoutMs,
+      });
+      const r = Array.isArray(res) ? res[0] : null;
+      if (r && r.dbColl && r.dbColl !== r.connColl && /^[A-Za-z0-9_]+$/.test(String(r.cs))) {
+        await conn.query({ sql: `SET NAMES ${r.cs} COLLATE ${r.dbColl}`, timeout: timeoutMs });
+      }
+    } catch { /* 探查失败不阻断脚本执行 */ }
+  }
+  return {
+    async exec(sql) {
+      await alignCollationOnce();
+      const [res] = await conn.query({ sql, timeout: timeoutMs });
+      return normalizeMysqlResults(res);
+    },
+    async count(table) {
+      try {
+        const [res] = await conn.query({ sql: `SELECT COUNT(*) AS c FROM ${quoteIdent(table)}`, timeout: timeoutMs });
+        const v = Array.isArray(res) ? res[0]?.c : undefined;
+        return typeof v === 'number' ? v : null;
+      } catch { return null; } // 表不存在/非法名 → null，核验降级不炸
+    },
+    async finish() {},
+    async close() { conn.release(); },
+  };
+}
+
 async function createPool(connUrl, opts = {}) {
   const timeoutMs = opts.queryTimeoutMs ?? 30_000;
   const cfg = parseUrl(connUrl);
@@ -128,15 +202,7 @@ async function createPool(connUrl, opts = {}) {
     },
     async openSession() {
       const conn = await pool.getConnection();
-      return {
-        async exec(sql) {
-          const [res] = await conn.query({ sql, timeout: timeoutMs });
-          const affectedRows = Array.isArray(res) ? res.length : (res.affectedRows ?? 0);
-          return { affectedRows };
-        },
-        async finish() {},
-        async close() { conn.release(); },
-      };
+      return createMysqlSession(conn, timeoutMs);
     },
     async close() {
       await pool.end();
@@ -144,4 +210,4 @@ async function createPool(connUrl, opts = {}) {
   };
 }
 
-module.exports = { createPool, parseUrl, quoteIdent };
+module.exports = { createPool, parseUrl, quoteIdent, normalizeMysqlResults, createMysqlSession };
