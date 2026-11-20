@@ -183,13 +183,12 @@ describe('tools · C 期回执与描述', () => {
     expect(text).toContain('参考值');
   });
 
-  it('script_status executed 业务成功（层2）', async () => {
+  it('script_status executed 业务成功', async () => {
     const { tools } = mkScriptTools({ status: 'executed', result: {
       ok: true, total: 8, executed: 8, durationMs: 100,
-      businessStatus: 'ok', businessSource: 'layer2_logtable', results: [], verification: [] } });
+      businessStatus: 'ok', results: [], verification: [] } });
     const text = await tools.execute('script_status', { requestId: 'r1' }, { roomId: 'room1' });
     expect(text).toContain('业务结果：成功');
-    expect(text).toContain('日志表');
   });
 
   it('dryrun 回执呈现 precheck 分级项', async () => {

@@ -30,15 +30,6 @@ function portOpen(port, host = '127.0.0.1') {
   });
 }
 
-const JUDGE = {
-  logTable: 'dap_e_script_execution_log',
-  scriptNoColumn: 'SCRIPT_NO',
-  statusColumn: 'EXECUTION_STATUS',
-  errorColumn: 'ERROR_MESSAGE',
-  okValue: '1',
-  // 有意不配 sortColumn：日志表 LOG_ID 自增主键 → 走引擎探测分支
-};
-
 const PERMS = ['query', 'insert', 'update', 'delete', 'ddl_table', 'ddl_other', 'procedure', 'script'];
 
 async function makeEngine() {
@@ -60,7 +51,7 @@ async function freshScene(mode = 'pre') {
     await admin.close();
   }
   const dispatch = await makeEngine();
-  await dispatch('configure', { connections: [{ name: 'dape', url: withDb(DB_NAME), queryTimeoutMs: 20_000, permissions: PERMS, scriptJudge: JUDGE }] });
+  await dispatch('configure', { connections: [{ name: 'dape', url: withDb(DB_NAME), queryTimeoutMs: 20_000, permissions: PERMS }] });
   const r1 = await dispatch('scriptRun', { connection: 'dape', script: readSql('01_schema_ddl.sql') });
   expect(r1.ok).toBe(true);
   const r2 = await dispatch('scriptRun', { connection: 'dape', script: readSql('02_sample_data.sql') });
@@ -85,12 +76,11 @@ const dIt = shouldRun ? it : it.skip;
 describe('业务成功判定与预检 · 样本包全场景（docker MySQL 8）', () => {
   beforeAll(() => { if (!shouldRun) console.warn('跳过：127.0.0.1 MySQL docker 未启动'); });
 
-  dIt('基线首登 03（pre 现场）：业务成功（层2 STATUS=1）+ 三表落库 3/5/5', async () => {
+  dIt('基线首登 03（pre 现场）：业务成功（无失败标记命中）+ 三表落库 3/5/5', async () => {
     const { dispatch } = await freshScene('pre');
     const r = await dispatch('scriptRun', { connection: 'dape', script: readSql('03_S00971511_v4_success.sql') });
     expect(r.ok).toBe(true);
     expect(r.businessStatus).toBe('ok');
-    expect(r.businessSource).toBe('layer2_logtable');
     expect(verifyOf(r, 'dap_e_mcp_endpoint').delta).toBe(3);
     expect(verifyOf(r, 'dap_e_mcp_tool').delta).toBe(5);
     expect(verifyOf(r, 'dap_e_mcp_tool_binding').delta).toBe(5);
@@ -104,7 +94,6 @@ describe('业务成功判定与预检 · 样本包全场景（docker MySQL 8）'
     const r = await dispatch('scriptRun', { connection: 'dape', script: readSql('03_S00971511_v4_success.sql') });
     expect(r.ok).toBe(true);
     expect(r.businessStatus).toBe('ok');
-    expect(r.businessSource).toBe('layer2_logtable');
     expect(verifyOf(r, 'dap_e_mcp_endpoint').delta).toBe(0);
     const callOut = r.results.find((x) => x.kind === 'call')?.outputs?.[0]?.rows?.[0]?.[0] ?? '';
     expect(callOut).toContain('[SKIP]');
@@ -117,7 +106,8 @@ describe('业务成功判定与预检 · 样本包全场景（docker MySQL 8）'
     expect(r.ok).toBe(true);
     expect(r.results.every((x) => x.status === 'ok')).toBe(true);
     expect(r.businessStatus).toBe('failed');
-    expect(r.businessSource).toBe('layer2_logtable');
+    expect(r.businessSource).toBe('layer1_marker');
+    expect(r.businessError).toContain('[FAIL]');
     expect(r.businessError).toContain('Duplicate');
     // 存储过程整体回滚：三表零落库；执行日志 +1（失败行）
     expect(verifyOf(r, 'dap_e_mcp_endpoint').delta).toBe(0);
@@ -138,6 +128,7 @@ describe('业务成功判定与预检 · 样本包全场景（docker MySQL 8）'
     const r = await dispatch('scriptRun', { connection: 'dape', script: broken });
     expect(r.ok).toBe(true);
     expect(r.businessStatus).toBe('failed');
+    expect(r.businessSource).toBe('layer1_marker');
     expect(r.businessError).toContain('[?] Unknown error');
     expect(verifyOf(r, 'dap_e_mcp_endpoint').delta).toBe(0);
   }, 120_000);

@@ -21,32 +21,6 @@ function dialectOf(url) {
   }
 }
 
-// 层 2 脚本判定配置归一（spec 2026-11-20 §8.2/§8.3）：logTable/scriptNoColumn/
-// statusColumn/okValue 四项必齐层 2 才启用；errorColumn/sortColumn 可选补充；
-// failPattern（层 1 覆盖）独立生效，须可编译。列名白名单防注入。
-const JUDGE_IDENT_RE = /^[A-Za-z0-9_$#]{1,64}$/;
-
-function normalizeScriptJudge(input) {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) return null;
-  const { logTable, scriptNoColumn, statusColumn, errorColumn, okValue, failPattern, sortColumn } = input;
-  const out = {};
-  if (typeof failPattern === 'string' && failPattern !== '') {
-    try { new RegExp(failPattern); } catch { throw new Error('scriptJudge.failPattern 不是合法正则表达式'); }
-    out.failPattern = failPattern;
-  }
-  const coreOk = [logTable, scriptNoColumn, statusColumn].every((v) => typeof v === 'string' && JUDGE_IDENT_RE.test(v))
-    && okValue !== undefined && okValue !== null && okValue !== '';
-  if (coreOk) {
-    out.logTable = logTable;
-    out.scriptNoColumn = scriptNoColumn;
-    out.statusColumn = statusColumn;
-    out.okValue = okValue;
-    if (typeof errorColumn === 'string' && JUDGE_IDENT_RE.test(errorColumn)) out.errorColumn = errorColumn;
-    if (typeof sortColumn === 'string' && JUDGE_IDENT_RE.test(sortColumn)) out.sortColumn = sortColumn;
-  }
-  return Object.keys(out).length > 0 ? out : null;
-}
-
 function createConnectionsStore({ dataDir, secrets, log }) {
   const file = path.join(dataDir, FILE);
   const urlCache = new Map();
@@ -91,7 +65,6 @@ function createConnectionsStore({ dataDir, secrets, log }) {
       return {
         id: r.id, name: r.name, description: r.description ?? '',
         permissions: r.permissions,
-        scriptJudge: r.scriptJudge ?? null,
         dialect: cached ? dialectOf(cached) : 'unknown',
         hasUrl: cached !== undefined,
       };
@@ -117,7 +90,7 @@ function createConnectionsStore({ dataDir, secrets, log }) {
         continue;
       }
       urlCache.set(r.id, url);
-      out.push({ name: r.name, url, permissions: r.permissions, scriptJudge: r.scriptJudge ?? null });
+      out.push({ name: r.name, url, permissions: r.permissions });
     }
     return out;
   }
@@ -131,10 +104,8 @@ function createConnectionsStore({ dataDir, secrets, log }) {
     assertUrl(url);
     const id = newId();
     const permissions = normalizePermissions(input.permissions?.length ? input.permissions : PRESETS.read);
-    const scriptJudge = normalizeScriptJudge(input.scriptJudge);
     const rec = {
       id, name, description: String(input.description ?? ''), permissions,
-      ...(scriptJudge ? { scriptJudge } : {}),
       createdAt: Date.now(), updatedAt: Date.now(),
     };
     await secrets.set(secretKey(id), url);
@@ -155,11 +126,6 @@ function createConnectionsStore({ dataDir, secrets, log }) {
     }
     if (typeof patch.description === 'string') rec.description = patch.description;
     if (Array.isArray(patch.permissions)) rec.permissions = normalizePermissions(patch.permissions);
-    if ('scriptJudge' in patch) {
-      const scriptJudge = normalizeScriptJudge(patch.scriptJudge);
-      if (scriptJudge) rec.scriptJudge = scriptJudge;
-      else delete rec.scriptJudge; // 清空配置 = 层 2 关闭
-    }
     if (typeof patch.url === 'string' && patch.url.trim() !== '') {
       assertUrl(patch.url.trim());
       await secrets.set(secretKey(id), patch.url.trim());
@@ -208,4 +174,4 @@ function createConnectionsStore({ dataDir, secrets, log }) {
   return { listProjection, listForEngine, warm, create, update, remove, migrateLegacy };
 }
 
-module.exports = { createConnectionsStore, normalizeScriptJudge };
+module.exports = { createConnectionsStore };

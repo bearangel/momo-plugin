@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import m from '../../plugins/db-pro/service/connections-store.js';
-const { createConnectionsStore, normalizeScriptJudge } = m;
+const { createConnectionsStore } = m;
 
 function mkStore(initialSecrets = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbpro-conns-'));
@@ -51,7 +51,7 @@ describe('connections-store CRUD', () => {
     const projB = store.listProjection().find((x) => x.name === 'b');
     await secrets.delete(`conn.${projB.id}.url`);
     const rows = await store.listForEngine();
-    expect(rows).toEqual([{ name: 'a', url: 'mysql://u:p@h/a', permissions: ['query'], scriptJudge: null }]);
+    expect(rows).toEqual([{ name: 'a', url: 'mysql://u:p@h/a', permissions: ['query'] }]);
   });
 
   it('新实例从磁盘恢复（重启语义）', async () => {
@@ -104,45 +104,3 @@ describe('migrateLegacy（保等效）', () => {
   });
 });
 
-// 层 2 脚本判定配置（spec 2026-11-20 §8.2/§8.3）：四项必齐启用；failPattern 独立生效
-describe('scriptJudge 配置归一与持久化', () => {
-  it('完整四项通过并持久化，listForEngine/listProjection 透出', async () => {
-    const { store } = mkStore();
-    await store.create({
-      name: 'dape', url: 'mysql://u:p@h/dape_dev', permissions: ['query'],
-      scriptJudge: { logTable: 'DAP_E_SCRIPT_EXECUTION_LOG', scriptNoColumn: 'SCRIPT_NO',
-        statusColumn: 'EXECUTION_STATUS', errorColumn: 'ERROR_MESSAGE', okValue: 1, sortColumn: 'ID' },
-    });
-    const engine = await store.listForEngine();
-    expect(engine[0].scriptJudge).toMatchObject({ logTable: 'DAP_E_SCRIPT_EXECUTION_LOG', okValue: 1, sortColumn: 'ID' });
-    expect(store.listProjection()[0].scriptJudge).toMatchObject({ statusColumn: 'EXECUTION_STATUS' });
-  });
-  it('三项必填缺一 → 层2 关闭，failPattern 仍保留', async () => {
-    const { store } = mkStore();
-    await store.create({ name: 'x', url: 'mysql://u:p@h/d', permissions: ['query'],
-      scriptJudge: { logTable: 'T', scriptNoColumn: 'S', failPattern: '^\\[X\\]' } });
-    const engine = await store.listForEngine();
-    expect(engine[0].scriptJudge.logTable).toBeUndefined();
-    expect(engine[0].scriptJudge.failPattern).toBe('^\\[X\\]');
-  });
-  it('okValue 缺失 → 层2 关闭（四项必齐）', () => {
-    const j = normalizeScriptJudge({ logTable: 'T', scriptNoColumn: 'S', statusColumn: 'ST' });
-    expect(j?.logTable).toBeUndefined();
-  });
-  it('非法正则拒绝（Review Focus 2）', () => {
-    expect(() => normalizeScriptJudge({ failPattern: '^[' })).toThrow(/正则/);
-  });
-  it('null/非对象 → null；空对象 → null', () => {
-    expect(normalizeScriptJudge(null)).toBeNull();
-    expect(normalizeScriptJudge('x')).toBeNull();
-    expect(normalizeScriptJudge({})).toBeNull();
-  });
-  it('update 可改/可清 scriptJudge', async () => {
-    const { store } = mkStore();
-    const a = await store.create({ name: 'a', url: 'mysql://u:p@h/d', permissions: ['query'] });
-    await store.update(a.id, { scriptJudge: { logTable: 'T', scriptNoColumn: 'S', statusColumn: 'ST', okValue: '1' } });
-    expect((await store.listForEngine())[0].scriptJudge.logTable).toBe('T');
-    await store.update(a.id, { scriptJudge: null });
-    expect((await store.listForEngine())[0].scriptJudge).toBeNull();
-  });
-});

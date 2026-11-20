@@ -8,45 +8,8 @@ const { splitStatements, summarize, extractScriptNo, classifyStatement, detectTe
 const { LEGACY_FULL, hasBit, missingBits, requiredBitsForClass } = require('./permissions');
 
 // 层 1 失败标记默认正则（spec 2026-11-20 §4.1）：DAP-E 模板约定 handler 失败分支
-// SELECT '[FAIL] …'——任一输出单元格命中即业务失败；连接级 scriptJudge.failPattern 可覆盖。
+// SELECT '[FAIL] …'——任一输出单元格命中即业务失败（C10 裁定：仅此一层判定）。
 const DEFAULT_FAIL_PATTERN = /^\[FAIL\]/;
-
-function compilePattern(p) {
-  try { return new RegExp(p); } catch { return DEFAULT_FAIL_PATTERN; } // 配置侧已校验，此处兜底不炸
-}
-
-function judgeIdentOk(v) {
-  return typeof v === 'string' && /^[A-Za-z0-9_$#]{1,64}$/.test(v);
-}
-
-function stringLit(v) {
-  return `'${String(v).replace(/'/g, "''")}'`;
-}
-
-// 层 2 权威判定（spec 2026-11-20 §4.2）：按脚本号查日志表最新一行，表内状态为权威。
-// 排序依据：scriptJudge.sortColumn > 探测自增主键 > 不可用告警（不猜）。
-async function queryScriptLog(session, judge, scriptNo) {
-  try {
-    let orderCol = judge.sortColumn ?? null;
-    if (!orderCol) {
-      const probe = await session.exec(
-        `SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ${stringLit(judge.logTable)} AND EXTRA LIKE '%auto_increment%'`);
-      const v = probe?.outputs?.[0]?.rows?.[0]?.[0];
-      if (judgeIdentOk(v)) orderCol = v;
-    }
-    if (!orderCol) return { status: 'unavailable', note: '日志表无排序列（未配 sortColumn 且探测不到自增主键）——层 2 不可用' };
-    const cols = [judge.statusColumn, ...(judge.errorColumn ? [judge.errorColumn] : []), orderCol].join(', ');
-    const r = await session.exec(
-      `SELECT ${cols} FROM ${judge.logTable} WHERE ${judge.scriptNoColumn} = ${stringLit(scriptNo)} ORDER BY ${orderCol} DESC LIMIT 1`);
-    const row = r?.outputs?.[0]?.rows?.[0];
-    if (!row) return { status: 'unavailable', note: '日志表无该脚本号记录——层 2 不可用' };
-    const ok = String(row[0]) === String(judge.okValue);
-    const errVal = judge.errorColumn && row[1] !== undefined && row[1] !== 'NULL' && row[1] !== 'null' ? String(row[1]) : null;
-    return ok ? { status: 'ok' } : { status: 'failed', error: errVal };
-  } catch (err) {
-    return { status: 'unavailable', note: `层 2 查询失败：${err instanceof Error ? err.message : String(err)}` };
-  }
-}
 
 function scanFailureMarker(outputs, pattern = DEFAULT_FAIL_PATTERN) {
   for (const out of outputs ?? []) {
@@ -104,8 +67,7 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
     for (const [name, h] of pools) {
       const n = next.get(name);
       const permsSame = n && JSON.stringify(h.permissions) === JSON.stringify(n.permissions ?? LEGACY_FULL);
-      const judgeSame = n && JSON.stringify(h.scriptJudge ?? null) === JSON.stringify(n.scriptJudge ?? null);
-      if (!n || n.url !== h.url || n.queryTimeoutMs !== h.queryTimeoutMs || !permsSame || !judgeSame) {
+      if (!n || n.url !== h.url || n.queryTimeoutMs !== h.queryTimeoutMs || !permsSame) {
         pools.delete(name);
         void h.pool.close().catch(() => undefined);
       }
@@ -114,8 +76,7 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
     for (const c of connections ?? []) {
       const cur = pools.get(c.name);
       if (cur && cur.url === c.url && cur.queryTimeoutMs === c.queryTimeoutMs
-        && JSON.stringify(cur.permissions) === JSON.stringify(c.permissions ?? LEGACY_FULL)
-        && JSON.stringify(cur.scriptJudge ?? null) === JSON.stringify(c.scriptJudge ?? null)) continue;
+        && JSON.stringify(cur.permissions) === JSON.stringify(c.permissions ?? LEGACY_FULL)) continue;
       pools.delete(c.name);
       unavailable.delete(c.name);
       try {
@@ -128,7 +89,6 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
           url: c.url,
           queryTimeoutMs: c.queryTimeoutMs,
           permissions: Array.isArray(c.permissions) ? c.permissions : LEGACY_FULL,
-          scriptJudge: c.scriptJudge ?? null,
           pool,
         });
       } catch (err) {
@@ -256,34 +216,21 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
             }
           }
           await session.finish(failure === null);
-          // 业务判定链（spec §4.3）：语句失败 > 层 2（scriptJudge，接线见 §4.2 任务）> 层 1 > ok
+          // 业务判定链（spec §4.3）：语句失败 > 层 1 标记 > ok（C10 裁定：层 2 权威判定不做）
           let businessStatus = 'ok';
           let businessError = null;
           let businessSource = null;
-          let layer2Note = null;
           if (failure !== null) {
             businessStatus = 'failed';
             businessError = failure.message;
             businessSource = 'statement';
           } else {
-            const judge = handle.scriptJudge;
-            const scriptNo = extractScriptNo(params.script);
-            let l2 = null;
-            if (judge?.logTable && scriptNo) l2 = await queryScriptLog(session, judge, scriptNo);
-            if (l2 && (l2.status === 'ok' || l2.status === 'failed')) {
-              businessStatus = l2.status;
-              businessError = l2.status === 'ok' ? null : (l2.error ?? '（日志表未提供错误信息）');
-              businessSource = 'layer2_logtable';
-            } else {
-              const pattern = judge?.failPattern ? compilePattern(judge.failPattern) : DEFAULT_FAIL_PATTERN;
-              const marker = scanFailureMarker(results.flatMap((x) => x.outputs ?? []), pattern);
-              if (marker) {
-                businessStatus = 'failed';
-                businessError = marker;
-                businessSource = 'layer1_marker';
-              }
+            const marker = scanFailureMarker(results.flatMap((x) => x.outputs ?? []));
+            if (marker) {
+              businessStatus = 'failed';
+              businessError = marker;
+              businessSource = 'layer1_marker';
             }
-            if (l2?.status === 'unavailable') layer2Note = l2.note;
           }
           const verification = [];
           for (const t of verifyTables) {
@@ -299,7 +246,6 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
             businessStatus,
             ...(businessError !== null ? { businessError } : {}),
             ...(businessSource !== null ? { businessSource } : {}),
-            ...(layer2Note !== null ? { layer2Note } : {}),
             ...(verifyTables.length > 0 ? { verification } : {}),
             ...(failedAtIndex !== null ? { failedAtIndex } : {}),
             ...(failure !== null ? { error: failure } : {}),
