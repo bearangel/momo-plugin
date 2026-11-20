@@ -515,3 +515,32 @@ describe('connError · 报错附可用连接（R7）', () => {
       .rejects.toThrow(/c1" 配置失败：ETIMEDOUT/);
   });
 });
+
+// scriptPrecheck 引擎方法（spec 2026-11-20 §6）：service dryrun 经 rpc 调用
+describe('dispatch · scriptPrecheck', () => {
+  it('切分脚本后调 runPrecheck，透传 items', async () => {
+    const pool = {
+      async ping() {}, async close() {},
+      query: async (sql) => {
+        if (/information_schema\.TABLES/i.test(sql)) return { columns: [], rows: [['t', 'utf8mb4_0900_ai_ci']] };
+        if (/@@collation_database/i.test(sql)) return { columns: [], rows: [['utf8mb4_0900_ai_ci']] };
+        if (/information_schema\.COLUMNS/i.test(sql)) return { columns: [], rows: [['t', 'a']] };
+        if (/information_schema\.STATISTICS/i.test(sql)) return { columns: [], rows: [] };
+        if (/COUNT/i.test(sql)) return { columns: [], rows: [[0]] };
+        throw new Error('unexpected: ' + sql);
+      },
+    };
+    const d = createDispatcher(() => ({ createPool: async () => pool }));
+    await d.dispatch('configure', { connections: CFG() });
+    const r = await d.dispatch('scriptPrecheck', { connection: 'c1', script: 'INSERT INTO t (a) VALUES (1);' });
+    expect(r.supported).toBe(true);
+    expect(Array.isArray(r.items)).toBe(true);
+  });
+  it('未配置连接 → connError；非 mysql → supported false', async () => {
+    const d = createDispatcher(() => ({ createPool: async () => fakeDriver().pool }));
+    await expect(d.dispatch('scriptPrecheck', { connection: 'x', script: 'SELECT 1;' })).rejects.toThrow(/当前可用|当前无已配置/);
+    await d.dispatch('configure', { connections: [{ name: 'p', url: 'postgres://u:p@h/d', queryTimeoutMs: 1000 }] });
+    const r = await d.dispatch('scriptPrecheck', { connection: 'p', script: 'SELECT 1;' });
+    expect(r.supported).toBe(false);
+  });
+});

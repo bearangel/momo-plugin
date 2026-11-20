@@ -2,6 +2,7 @@
 // db-pro 引擎子进程主体（spec §4.4）：连接池 Map + 方法调度 + 只读校验接线。
 // 协议：NDJSON JSON-RPC（protocol.js）；驱动懒加载（缺方言不拖垮其他连接）。
 const { runServer, EngineError, CODES } = require('./protocol');
+const { runPrecheck } = require('./precheck');
 const { assertReadOnly } = require('./sql-validator');
 const { splitStatements, summarize, extractScriptNo, classifyStatement, detectTemplateIssues } = require('./script-splitter');
 const { LEGACY_FULL, hasBit, missingBits, requiredBitsForClass } = require('./permissions');
@@ -200,6 +201,15 @@ function createDispatcher(loadDriver = (d) => DIALECT_LOADERS[d](), pools = new 
         const issues = detectTemplateIssues(r.statements);
         if (issues.length > 0) r.warnings.push(...issues);
         return { ...r, summary: summarize(r.statements), scriptNo: extractScriptNo(params.script) };
+      }
+      // 连库预检（spec 2026-11-20 §6）：只读 information_schema + COUNT，dryrun 咨询性质
+      case 'scriptPrecheck': {
+        const handle = pools.get(params.connection);
+        if (!handle) throw connError(params.connection);
+        assertPerm(params.connection, 'read');
+        const dialect = dialectOfUrl(handle.url);
+        const { statements } = splitStatements(params.script, dialect);
+        return await runPrecheck(handle.pool, statements, dialect);
       }
       // 脚本执行仅由 service 在人工批准后调用（与 exec 同侧边界）
       case 'scriptRun': {
