@@ -29,7 +29,7 @@ function stmt(text, cls = 'insert') {
 describe('extractInsertInfo（INSERT 静态解析纯函数）', () => {
   it('普通 INSERT：表/列/字面量元组', () => {
     const r = extractInsertInfo("INSERT INTO t (a, b, c) VALUES (1, 'x', NULL);");
-    expect(r).toEqual({ table: 't', columns: ['a', 'b', 'c'], literals: ['1', "'x'", 'NULL'] });
+    expect(r).toEqual({ table: 't', columns: ['a', 'b', 'c'], literals: ['1', "'x'", 'NULL'], tuples: [['1', "'x'", 'NULL']] });
   });
   it('含变量/函数 → literals 对应位 null（Review Focus 4）', () => {
     const r = extractInsertInfo('INSERT INTO t (a, b) VALUES (@v, NOW());');
@@ -153,5 +153,37 @@ describe('runPrecheck · 方言与容错', () => {
     };
     const r = await runPrecheck(pool, [procStmt], 'mysql');
     expect(r.items.some((x) => x.code === 'column_mismatch')).toBe(true);
+  });
+});
+
+describe('extractInsertInfo · 多行 VALUES（spec §6 检查3：逐元组预演）', () => {
+  it('多行 VALUES 返回全部元组字面量', () => {
+    const r = extractInsertInfo("INSERT INTO t (id, name) VALUES (1, 'a'), (2, 'b'), (3, @v);");
+    expect(r.tuples).toEqual([['1', "'a'"], ['2', "'b'"], ['3', null]]);
+  });
+  it('单行 VALUES tuples 与 literals 一致', () => {
+    const r = extractInsertInfo("INSERT INTO t (id) VALUES (1);");
+    expect(r.tuples).toEqual([['1']]);
+    expect(r.literals).toEqual(['1']);
+  });
+});
+
+describe('runPrecheck · 列匹配方向（表列缺省依赖默认值，不告警）', () => {
+  it('INSERT 未列出全部表列（有默认值）→ 不报 column_mismatch', async () => {
+    const pool = fakePool({ tables: [['t', 'x']], columns: [['t', 'a'], ['t', 'b'], ['t', 'c']] });
+    const r = await runPrecheck(pool, [stmt('INSERT INTO t (a) VALUES (1)')], 'mysql');
+    expect(r.items.some((x) => x.code === 'column_mismatch')).toBe(false);
+  });
+  it('多行 VALUES 逐元组 UK 预演（冲突在第 4 元组也命中）', async () => {
+    const pool = fakePool({
+      tables: [['t', 'x']],
+      columns: [['t', 'uk1']],
+      stats: [['UK_X', 'uk1', 0]],
+      counts: [0, 0, 0, 1],
+    });
+    const r = await runPrecheck(pool, [stmt("INSERT INTO t (uk1) VALUES ('a'), ('b'), ('c'), ('conflict')")], 'mysql');
+    const hit = r.items.find((x) => x.code === 'uk_conflict');
+    expect(hit).toBeDefined();
+    expect(hit.message).toContain('t');
   });
 });

@@ -31,13 +31,33 @@ function extractInsertInfo(text) {
       if (depth === 0) { end = i; break; }
     }
   }
-  if (end < 0) return { table, columns, literals: null };
-  const literals = splitTopLevel(tail.slice(open + 1, end)).map((v) => {
+  if (end < 0) return { table, columns, literals: null, tuples: null };
+  const literalsOf = (tupleText) => splitTopLevel(tupleText).map((v) => {
     const t = v.trim();
     if (/^'(?:[^']|'')*'$/.test(t) || /^-?\d+(\.\d+)?$/.test(t) || /^(NULL|TRUE|FALSE)$/i.test(t)) return t;
     return null;
   });
-  return { table, columns, literals };
+  // 收集 VALUES 后全部顶层元组（多行 INSERT 逐元组参与 UK 预演——冲突可能在第 N 行）
+  const tuples = [literalsOf(tail.slice(open + 1, end))];
+  let pos = end + 1;
+  while (pos < tail.length) {
+    const rest = tail.slice(pos);
+    const m = rest.match(/^\s*,\s*\(/);
+    if (!m) break;
+    const o2 = pos + m[0].length - 1;
+    let d2 = 0;
+    let e2 = -1;
+    for (let i = o2; i < tail.length; i += 1) {
+      const c = tail[i];
+      if (c === '(') d2 += 1;
+      else if (c === ')') { d2 -= 1; if (d2 === 0) { e2 = i; break; } }
+    }
+    if (e2 < 0) break;
+    tuples.push(literalsOf(tail.slice(o2 + 1, e2)));
+    pos = e2 + 1;
+  }
+  const literals = tuples[0];
+  return { table, columns, literals, tuples };
 }
 
 /** 顶层逗号切分（忽略括号嵌套与单引号串内逗号） */
@@ -90,7 +110,8 @@ async function runPrecheck(pool, statements, dialect) {
   ])].filter((t) => IDENT_RE.test(t)).slice(0, TABLE_CAP);
   if (targetTables.length === 0) return { supported: true, items };
 
-  const inList = targetTables.map((t) => `'${t}'`).join(', ');
+  // lctn=1 服务器 information_schema 存小写表名且字符串比较大小写敏感——统一 LOWER() 探查 + 小写键匹配
+  const inList = targetTables.map((t) => `'${t.toLowerCase()}'`).join(', ');
   const createdInScript = new Set(stmts
     .filter((s) => s.cls === 'ddl_table' && /^create/i.test(s.keyword))
     .flatMap((s) => s.tables ?? []));
@@ -99,8 +120,8 @@ async function runPrecheck(pool, statements, dialect) {
   const dbTables = new Map();
   try {
     const r = await pool.query(
-      `SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${inList})`);
-    for (const row of r.rows ?? []) dbTables.set(String(row[0]), String(row[1] ?? ''));
+      `SELECT TABLE_NAME, TABLE_COLLATION FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) IN (${inList})`);
+    for (const row of r.rows ?? []) dbTables.set(String(row[0]).toLowerCase(), String(row[1] ?? ''));
   } catch (err) {
     items.push({ level: 'info', code: 'skipped', message: `表存在性/collation 预检跳过：${err.message}` });
   }
@@ -111,11 +132,11 @@ async function runPrecheck(pool, statements, dialect) {
   } catch { /* collation 探查失败不影响其余检查 */ }
 
   for (const t of targetTables) {
-    if (!dbTables.has(t) && !createdInScript.has(t)) {
+    if (!dbTables.has(t.toLowerCase()) && !createdInScript.has(t.toLowerCase()) && !createdInScript.has(t)) {
       items.push({ level: 'warn', code: 'table_missing', message: `目标表 ${t} 不存在（脚本内亦无先前 CREATE）——执行将失败` });
-    } else if (dbCollation && dbTables.has(t) && dbTables.get(t) !== dbCollation) {
+    } else if (dbCollation && dbTables.has(t.toLowerCase()) && dbTables.get(t.toLowerCase()) !== dbCollation) {
       items.push({ level: 'warn', code: 'collation_mismatch',
-        message: `表 ${t} collation=${dbTables.get(t)} 与库默认 ${dbCollation} 不一致——过程/变量比较可能报 Illegal mix of collations，建议脚本显式 SET NAMES` });
+        message: `表 ${t} collation=${dbTables.get(t.toLowerCase())} 与库默认 ${dbCollation} 不一致——过程/变量比较可能报 Illegal mix of collations，建议脚本显式 SET NAMES` });
     }
   }
 
@@ -126,23 +147,25 @@ async function runPrecheck(pool, statements, dialect) {
 
   // 检查 2：INSERT 列匹配
   const colMap = new Map();
-  const needCols = [...new Set(insertInfos.filter((x) => x.info.columns).map((x) => x.info.table))];
+  const needCols = [...new Set(insertInfos.filter((x) => x.info.columns).map((x) => x.info.table.toLowerCase()))];
   if (needCols.length > 0) {
     try {
       const r = await pool.query(
-        `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN (${needCols.map((t) => `'${t}'`).join(', ')})`);
+        `SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) IN (${needCols.map((t) => `'${t}'`).join(', ')})`);
       for (const row of r.rows ?? []) {
-        if (!colMap.has(String(row[0]))) colMap.set(String(row[0]), new Set());
-        colMap.get(String(row[0])).add(String(row[1]).toLowerCase());
+        const key = String(row[0]).toLowerCase();
+        if (!colMap.has(key)) colMap.set(key, new Set());
+        colMap.get(key).add(String(row[1]).toLowerCase());
       }
       for (const { info, line } of insertInfos) {
-        if (!info.columns || !colMap.has(info.table)) continue;
-        const actual = colMap.get(info.table);
+        if (!info.columns || !colMap.has(info.table.toLowerCase())) continue;
+        // 只报 INSERT 列清单中表里不存在的列（拼写错/虚构列）；
+        // 表列未出现在 INSERT 清单属默认值语义，不构成错误（2026-11-20 集成实证修正）
+        const actual = colMap.get(info.table.toLowerCase());
         const unknown = info.columns.filter((c) => !actual.has(c.toLowerCase()));
-        const missing = [...actual].filter((c) => !info.columns.map((x) => x.toLowerCase()).includes(c));
-        if (unknown.length > 0 || missing.length > 0) {
+        if (unknown.length > 0) {
           items.push({ level: 'warn', code: 'column_mismatch',
-            message: `第 ${line} 行 INSERT INTO ${info.table} 列不匹配${unknown.length ? `：未知列 ${unknown.join(', ')}` : ''}${missing.length ? `；缺列 ${missing.join(', ')}` : ''}` });
+            message: `第 ${line} 行 INSERT INTO ${info.table} 未知列（表中不存在）：${unknown.join(', ')}` });
         }
       }
     } catch (err) {
@@ -158,7 +181,7 @@ async function runPrecheck(pool, statements, dialect) {
     let groups = null;
     try {
       const r = await pool.query(
-        `SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '${table}'`);
+        `SELECT INDEX_NAME, COLUMN_NAME, NON_UNIQUE FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND LOWER(TABLE_NAME) = '${table.toLowerCase()}'`);
       groups = new Map();
       for (const row of r.rows ?? []) {
         if (Number(row[2]) !== 0) continue; // 只看唯一索引（含 PRIMARY）
@@ -176,25 +199,29 @@ async function runPrecheck(pool, statements, dialect) {
       items.push({ level: 'info', code: 'skipped', message: '预检超时（30s）——后续唯一键预演跳过' });
       break;
     }
-    if (!info.columns || !info.literals) continue;
+    if (!info.columns || !info.literals || !info.tuples) continue;
     const groups = await ukGroupsOf(info.table);
     if (!groups || groups.size === 0) continue;
     const colLower = info.columns.map((c) => c.toLowerCase());
     for (const [, ukCols] of groups) {
       const positions = ukCols.map((uc) => colLower.indexOf(uc));
       if (positions.some((p) => p < 0)) continue;
-      const lits = positions.map((p) => info.literals[p]);
-      if (lits.some((l) => l === null || /^null$/i.test(l))) continue; // 字面量不齐 → 静默跳过
-      const where = ukCols.map((uc, i) => `${uc} = ${sqlLit(lits[i])}`).join(' AND ');
-      try {
-        const r = await pool.query(`SELECT COUNT(*) FROM \`${info.table}\` WHERE ${where}`);
-        const n = Number(r.rows?.[0]?.[0] ?? 0);
-        if (n > 0) {
-          items.push({ level: 'high', code: 'uk_conflict',
-            message: `第 ${line} 行 INSERT INTO ${info.table} 与已存在记录冲突（唯一键 ${ukCols.join('+')} 已有 ${n} 行匹配）——存储过程内冲突将回滚并写失败日志` });
+      for (const tuple of info.tuples) {
+        const lits = positions.map((p) => tuple[p]);
+        if (lits.some((l) => l === null || l === undefined || /^null$/i.test(l))) continue; // 字面量不齐 → 静默跳过
+        const where = ukCols.map((uc, i) => `${uc} = ${sqlLit(lits[i])}`).join(' AND ');
+        try {
+          const r = await pool.query(`SELECT COUNT(*) FROM \`${info.table}\` WHERE ${where}`);
+          const n = Number(r.rows?.[0]?.[0] ?? 0);
+          if (n > 0) {
+            items.push({ level: 'high', code: 'uk_conflict',
+              message: `第 ${line} 行 INSERT INTO ${info.table} 与已存在记录冲突（唯一键 ${ukCols.join('+')} 已有 ${n} 行匹配）——存储过程内冲突将回滚并写失败日志` });
+            break; // 该唯一键组命中一次即报
+          }
+        } catch (err) {
+          items.push({ level: 'info', code: 'skipped', message: `${info.table} 唯一键预演跳过：${err.message}` });
+          break;
         }
-      } catch (err) {
-        items.push({ level: 'info', code: 'skipped', message: `${info.table} 唯一键预演跳过：${err.message}` });
       }
     }
   }

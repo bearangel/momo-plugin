@@ -217,3 +217,23 @@ DELIMITER ;`;
     expect(detectTemplateIssues(splitStatements('CREATE TABLE t (id INT);', 'mysql').statements)).toEqual([]);
   });
 });
+
+describe('inferTables · 多表语句全量收集（spec 2026-11-20 §7.2 核验依赖）', () => {
+  it('单语句内多个 INSERT 目标表全部收集（handler 日志表在前不遮蔽业务表）', () => {
+    const text = `CREATE PROCEDURE sp() BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION BEGIN
+    INSERT INTO DAP_E_SCRIPT_EXECUTION_LOG VALUES (1);
+  END;
+  INSERT INTO DAP_E_MCP_ENDPOINT VALUES (1);
+  INSERT INTO DAP_E_MCP_TOOL VALUES (1);
+  INSERT INTO DAP_E_MCP_TOOL_BINDING VALUES (1);
+END`;
+    const { cls, tables } = classifyStatement(text);
+    expect(cls).toBe('procedure');
+    expect(tables).toEqual(['DAP_E_SCRIPT_EXECUTION_LOG', 'DAP_E_MCP_ENDPOINT', 'DAP_E_MCP_TOOL', 'DAP_E_MCP_TOOL_BINDING']);
+  });
+  it('同表多次 INSERT 去重', () => {
+    const { tables } = classifyStatement('INSERT INTO t VALUES (1); INSERT INTO t VALUES (2)');
+    expect(tables).toEqual(['t']);
+  });
+});

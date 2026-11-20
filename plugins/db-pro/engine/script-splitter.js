@@ -26,21 +26,23 @@ function firstKeyword(text) {
 }
 
 const TABLE_PATTERNS = [
-  /\b(?:insert\s+into|replace\s+into|merge\s+into)\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\bupdate\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\bdelete\s+from\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\btruncate\s+table\s+([A-Za-z0-9_$."`[\]]+)/i,
-  /\b(?:create|drop|alter)\s+table\s+(?:if\s+(?:not\s+)?exists\s+)?([A-Za-z0-9_$."`[\]]+)/i,
-  /\bcreate\s+(?:unique\s+)?index\s+\S+\s+on\s+([A-Za-z0-9_$."`[\]]+)/i,
+  /\b(?:insert\s+into|replace\s+into|merge\s+into)\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\bupdate\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\bdelete\s+from\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\btruncate\s+table\s+([A-Za-z0-9_$."`[\]]+)/gi,
+  /\b(?:create|drop|alter)\s+table\s+(?:if\s+(?:not\s+)?exists\s+)?([A-Za-z0-9_$."`[\]]+)/gi,
+  /\bcreate\s+(?:unique\s+)?index\s+\S+\s+on\s+([A-Za-z0-9_$."`[\]]+)/gi,
 ];
 
+// 逐模式全量收集（matchAll）：存储过程体内多个 INSERT 目标都要进 tables——
+// R6 核验快照与 R4 预检依赖完整表清单，首匹配会漏表（2026-11-20 集成实证）
 function inferTables(text) {
   const out = [];
   for (const re of TABLE_PATTERNS) {
-    const m = text.match(re);
-    if (!m) continue;
-    const name = m[1].replace(/["`[\]]/g, '').split('.').pop();
-    if (name && !out.includes(name)) out.push(name);
+    for (const m of String(text).matchAll(re)) {
+      const name = m[1].replace(/["`[\]]/g, '').split('.').pop();
+      if (name && !out.includes(name)) out.push(name);
+    }
   }
   return out;
 }

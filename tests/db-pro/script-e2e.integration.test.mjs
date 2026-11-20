@@ -45,7 +45,7 @@ describe.skipIf(!ON)('MySQL 脚本 E2E · 通用模板形状', () => {
     await d.dispatch('exec', { connection: 'e2e', sql: 'DROP TABLE IF EXISTS seed_t' });
     await d.dispatch('exec', { connection: 'e2e', sql: 'DROP PROCEDURE IF EXISTS p_demo_seed' });
     await d.dispatch('exec', { connection: 'e2e', sql: 'CREATE TABLE seed_t (id INT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(20))' });
-    await d.dispatch('exec', { connection: 'e2e', sql: 'CREATE TABLE script_log (script_no VARCHAR(40) COLLATE utf8mb4_unicode_ci, ok TINYINT)' });
+    await d.dispatch('exec', { connection: 'e2e', sql: 'CREATE TABLE script_log (script_no VARCHAR(40), ok TINYINT)' });
 
     const first = await d.dispatch('scriptRun', { connection: 'e2e', script: SCRIPT, onError: 'abort' });
     expect(first.ok).toBe(true);
