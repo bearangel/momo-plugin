@@ -80,7 +80,8 @@ describe('createMysqlSession · exec/count（spec 2026-11-20 §7.1/§7.2）', ()
     };
   }
   it('exec 走 normalizeMysqlResults', async () => {
-    const conn = fakeConn([[{ a: '[FAIL] x' }]]);
+    // 探查应答（会话=库默认，不发 SET NAMES）在前，exec 应答在后
+    const conn = fakeConn([[{ cs: 'utf8mb4', dbColl: 'c', connColl: 'c' }], [{ a: '[FAIL] x' }]]);
     const s = createMysqlSession(conn, 30_000);
     const r = await s.exec('CALL sp()');
     expect(r.outputs[0].rows).toEqual([['[FAIL] x']]);
@@ -97,5 +98,61 @@ describe('createMysqlSession · exec/count（spec 2026-11-20 §7.1/§7.2）', ()
     const s = createMysqlSession(conn, 30_000);
     expect(await s.count('a b')).toBeNull();
     expect(await s.count('t2')).toBeNull();
+  });
+});
+
+describe('createMysqlSession · collation 自动对齐（spec 2026-11-20 §5，R3）', () => {
+  function fakeConn(sends) {
+    const log = [];
+    return {
+      log,
+      async query(opts) {
+        log.push(opts.sql);
+        const r = sends.shift();
+        if (typeof r === 'function') return r(opts.sql);
+        return [r];
+      },
+      release() {},
+    };
+  }
+  it('会话 ≠ 库默认 → 首次 exec 前发 SET NAMES 对齐', async () => {
+    const conn = fakeConn([
+      [{ cs: 'utf8mb4', dbColl: 'utf8mb4_0900_ai_ci', connColl: 'utf8mb4_unicode_ci' }],
+      { affectedRows: 0 },
+      [{ affectedRows: 1 }],
+    ]);
+    const s = createMysqlSession(conn, 30_000);
+    await s.exec('SELECT 1');
+    expect(conn.log[0]).toContain('@@collation_database');
+    expect(conn.log[1]).toBe('SET NAMES utf8mb4 COLLATE utf8mb4_0900_ai_ci');
+    expect(conn.log[2]).toBe('SELECT 1');
+  });
+  it('会话 = 库默认 → 不发 SET NAMES', async () => {
+    const conn = fakeConn([
+      [{ cs: 'utf8mb4', dbColl: 'utf8mb4_0900_ai_ci', connColl: 'utf8mb4_0900_ai_ci' }],
+      [{ affectedRows: 1 }],
+    ]);
+    const s = createMysqlSession(conn, 30_000);
+    await s.exec('SELECT 1');
+    expect(conn.log).toEqual([expect.stringContaining('@@collation_database'), 'SELECT 1']);
+  });
+  it('探查失败 → 静默跳过不阻断', async () => {
+    const conn = fakeConn([() => { throw new Error('no priv'); }, [{ affectedRows: 1 }]]);
+    const s = createMysqlSession(conn, 30_000);
+    const r = await s.exec('SELECT 1');
+    expect(r.affectedRows).toBe(1);
+    expect(conn.log[1]).toBe('SELECT 1');
+  });
+  it('对齐只做一次（后续 exec 不再探查）', async () => {
+    const conn = fakeConn([
+      [{ cs: 'utf8mb4', dbColl: 'utf8mb4_0900_ai_ci', connColl: 'utf8mb4_unicode_ci' }],
+      { affectedRows: 0 },
+    ]);
+    const s = createMysqlSession(conn, 30_000);
+    await s.exec('SELECT 1');
+    const callsAfterFirst = conn.log.length;
+    await s.exec('SELECT 2');
+    expect(conn.log.length).toBe(callsAfterFirst + 1);
+    expect(conn.log.at(-1)).toBe('SELECT 2');
   });
 });

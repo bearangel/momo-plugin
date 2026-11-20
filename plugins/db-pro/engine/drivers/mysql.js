@@ -66,8 +66,28 @@ function normalizeMysqlResults(res) {
 
 /** 会话工厂（导出以便单测注入假 conn）：exec 带结果集捕获；count 供核验快照 */
 function createMysqlSession(conn, timeoutMs) {
+  let aligned = false;
+  // R3（spec §5）：驱动默认会话 collation（utf8mb4_unicode_ci）≠ 目标库默认
+  // （如 utf8mb4_0900_ai_ci）时，过程/用户变量与表列比较会炸 Illegal mix
+  // of collations——首次 exec 前对齐到 @@collation_database；脚本自带
+  // SET NAMES 时后执行自然覆盖。charset 名来自服务器变量，白名单防注入。
+  async function alignCollationOnce() {
+    if (aligned) return;
+    aligned = true;
+    try {
+      const [res] = await conn.query({
+        sql: 'SELECT @@character_set_database AS cs, @@collation_database AS dbColl, @@collation_connection AS connColl',
+        timeout: timeoutMs,
+      });
+      const r = Array.isArray(res) ? res[0] : null;
+      if (r && r.dbColl && r.dbColl !== r.connColl && /^[A-Za-z0-9_]+$/.test(String(r.cs))) {
+        await conn.query({ sql: `SET NAMES ${r.cs} COLLATE ${r.dbColl}`, timeout: timeoutMs });
+      }
+    } catch { /* 探查失败不阻断脚本执行 */ }
+  }
   return {
     async exec(sql) {
+      await alignCollationOnce();
       const [res] = await conn.query({ sql, timeout: timeoutMs });
       return normalizeMysqlResults(res);
     },
