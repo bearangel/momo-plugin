@@ -1,7 +1,7 @@
 {
   "id": "db-pro",
   "name": "db-pro 数据库工具",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MySQL / PostgreSQL / Oracle / 达梦 查询：只读直查 + 写操作人工批准（多连接）",
   "minAppVersion": "2.1.0",
   "components": { "tools": "./tools", "service": "./service", "skills": "./skills", "panel": "./panel" },

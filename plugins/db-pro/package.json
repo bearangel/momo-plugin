@@ -1,6 +1,6 @@
 {
   "name": "momo-plugin-db-pro",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "db-pro 插件运行时依赖（四库纯 JS 驱动）",
   "dependencies": {
