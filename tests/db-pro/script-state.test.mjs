@@ -173,3 +173,41 @@ describe('审批前权限预检', () => {
     expect(gate.created).toHaveLength(1);
   });
 });
+
+// C 期接线（spec 2026-11-20 §3/§7.1）：dryrun 并入连库预检；历史携带业务状态
+describe('script-state · dryrun 预检与业务状态落账', () => {
+  it('dryrun 并入 precheck items（默认开启）', async () => {
+    const { state } = makeDeps({ precheck: async () => ({ supported: true, items: [{ level: 'high', code: 'uk_conflict', message: 't 与已存在记录冲突' }] }) });
+    const r = await state.submit({ connection: 'c', script: 'SELECT 1', sessionId: 's', dryrun: true });
+    expect(r.precheck.ran).toBe(true);
+    expect(r.precheck.items[0].code).toBe('uk_conflict');
+    expect(r.precheck.items[0].level).toBe('high');
+  });
+  it('precheck 抛错（连接不可达）→ 降级提示不阻断静态部分', async () => {
+    const { state } = makeDeps({ precheck: async () => { throw new Error('引擎请求超时: scriptPrecheck'); } });
+    const r = await state.submit({ connection: 'c', script: 'SELECT 1', sessionId: 's', dryrun: true });
+    expect(r.precheck.ran).toBe(false);
+    expect(r.precheck.note).toContain('预检跳过');
+    expect(r.statements.length).toBe(2);
+  });
+  it('未注入 precheck（旧装配）→ 同样降级不炸', async () => {
+    const { state } = makeDeps();
+    const r = await state.submit({ connection: 'c', script: 'X', sessionId: 's', dryrun: true });
+    expect(r.precheck.ran).toBe(false);
+  });
+  it('history 携带 businessStatus/businessError', async () => {
+    const { state, rows } = makeDeps({ run: async () => ({ ok: true, total: 2, executed: 2, results: [],
+      businessStatus: 'failed', businessError: '[FAIL] S1 -- [23000] dup', businessSource: 'layer1_marker', durationMs: 5 }) });
+    const { requestId } = await state.submit({ connection: 'c', script: 'X', sessionId: 's' });
+    rows.get(requestId).status = 'answered';
+    rows.get(requestId).answerJson = JSON.stringify({ decision: 'approve' });
+    for (let i = 0; i < 50; i += 1) {
+      const r = await state.status({ requestId });
+      if (r.status === 'executed') break;
+      await new Promise((res) => setTimeout(res, 5));
+    }
+    const hist = await state.history({ limit: 10 });
+    expect(hist.entries[0].businessStatus).toBe('failed');
+    expect(hist.entries[0].businessError).toContain('[23000]');
+  });
+});

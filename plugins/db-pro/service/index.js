@@ -55,6 +55,10 @@ function createService(ctx) {
       if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
       return await rpc('scriptAnalyze', { script, dialect: dialectOfUrl(connection) }, 30_000);
     },
+    precheck: async (connection, script) => {
+      if (!child) throw new Error('db-pro 引擎未就绪（启动中/重启中，请稍后重试）');
+      return await rpc('scriptPrecheck', { connection, script }, 35_000);
+    },
     run: async (payload) => {
       if (!child) throw new Error('db-pro 引擎未就绪（脚本作业中止）');
       const timeoutMs = sanitizeScriptTimeoutMs(ctx.getConfig().script_timeout_ms);

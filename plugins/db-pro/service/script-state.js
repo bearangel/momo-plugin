@@ -22,7 +22,11 @@ function readEntries(file) {
   }
 }
 
-function createScriptState({ humanGate, analyze, run, dataDir, log, permissionsOf = async () => LEGACY_FULL }) {
+function createScriptState({
+  humanGate, analyze, run, dataDir, log,
+  permissionsOf = async () => LEGACY_FULL,
+  precheck = async () => { throw new Error('precheck 未注入'); },
+}) {
   const file = path.join(dataDir, HISTORY_FILE);
   const records = new Map(readEntries(file).map((e) => [e.requestId, e]));
   const jobs = new Map();
@@ -71,7 +75,14 @@ function createScriptState({ humanGate, analyze, run, dataDir, log, permissionsO
       return { dryrun: p.dryrun === true, statements: [], warnings: analysis.warnings ?? [], summary: analysis.summary, scriptNo: analysis.scriptNo, note: '0 条语句（空脚本/纯注释/纯客户端指令）' };
     }
     if (p.dryrun === true) {
-      return { dryrun: true, statements: analysis.statements, warnings: analysis.warnings, summary: analysis.summary, scriptNo: analysis.scriptNo };
+      // C 期（spec 2026-11-20 §6）：dryrun 默认并入连库预检；不可达降级为纯静态 + 提示
+      let pc;
+      try {
+        pc = { ran: true, ...(await precheck(connection, script)) };
+      } catch (err) {
+        pc = { ran: false, note: `预检跳过：${err instanceof Error ? err.message : String(err)}` };
+      }
+      return { dryrun: true, statements: analysis.statements, warnings: analysis.warnings, summary: analysis.summary, scriptNo: analysis.scriptNo, precheck: pc };
     }
     const onError = p.onError === 'continue' ? 'continue' : 'abort';
     const counts = analysis.summary?.counts ?? {};
@@ -180,6 +191,8 @@ function createScriptState({ humanGate, analyze, run, dataDir, log, permissionsO
         result: e.status === 'executed' ? 'ok' : e.status === 'failed' ? 'failed' : e.status,
         statementCount: e.statementCount ?? null, failedAtIndex: e.failedAtIndex ?? null,
         errorSummary: e.errorSummary ?? null, durationMs: e.durationMs ?? null,
+        businessStatus: e.result?.businessStatus ?? null,
+        businessError: e.result?.businessError ?? null,
       }));
     return { entries };
   }
