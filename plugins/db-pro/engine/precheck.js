@@ -78,11 +78,6 @@ function splitTopLevel(s) {
   return out;
 }
 
-function sqlLit(literal) {
-  // 字面量已是带引号/裸数字形态，直接拼入；字面量本身不含未转义引号（regex 已保证）
-  return literal;
-}
-
 async function runPrecheck(pool, statements, dialect) {
   if (dialect !== 'mysql') {
     return { supported: false, note: '该方言暂不支持预检', items: [] };
@@ -209,7 +204,8 @@ async function runPrecheck(pool, statements, dialect) {
       for (const tuple of info.tuples) {
         const lits = positions.map((p) => tuple[p]);
         if (lits.some((l) => l === null || l === undefined || /^null$/i.test(l))) continue; // 字面量不齐 → 静默跳过
-        const where = ukCols.map((uc, i) => `${uc} = ${sqlLit(lits[i])}`).join(' AND ');
+        // 字面量已是带引号/裸数字形态，直接拼入（提取正则保证不含未转义引号）
+      const where = ukCols.map((uc, i) => `${uc} = ${lits[i]}`).join(' AND ');
         try {
           const r = await pool.query(`SELECT COUNT(*) FROM \`${info.table}\` WHERE ${where}`);
           const n = Number(r.rows?.[0]?.[0] ?? 0);
